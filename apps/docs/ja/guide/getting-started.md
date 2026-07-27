@@ -1,8 +1,9 @@
 ---
 description: "1 つのコマンドで SnapOtter を Docker でインストールします。Docker Compose のセットアップ、ソースからのビルド、機能の全体像を含みます。"
-i18n_output_hash: c84093005283
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: 254b9e41e358
+i18n_hash_version: 2
 ---
 
 # はじめに {#getting-started}
@@ -17,7 +18,7 @@ i18n_provenance: human
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-この単一コンテナは、必要なものすべてを内部で実行します。`DATABASE_URL` が未設定の場合、ループバックインターフェイス上で独自の PostgreSQL と Redis を起動し（組み込みモード）、すべてのデータを `SnapOtter-data` ボリュームに保持します。SnapOtter を試す、あるいはホームラボでセルフホストする最速の方法です。本番環境では、下記の [Docker Compose](#docker-compose) スタックを実行してください。こちらは PostgreSQL と Redis をそれぞれ専用のコンテナに保ちます。組み込みモードは root（デフォルト）として実行され、`DATABASE_URL` を設定するとすぐに自動的にオフになります。
+この単一のコンテナーは必要なものをすべて実行します。`DATABASE_URL` を設定せずに、ループバック インターフェイス (埋め込みモード) で独自の PostgreSQL と Redis を開始し、すべてのデータを `SnapOtter-data` ボリュームに保持します。これは、ホームラボで SnapOtter またはセルフホストを試す最も速い方法です。運用環境では、PostgreSQL と Redis を独自のコンテナーに保持する [正規の Docker Compose スタック](#docker-compose) を使用します。埋め込みモードは root (デフォルト) として実行され、`DATABASE_URL` を設定するとすぐに自動的にオフになります。
 
 Raspberry Pi、古いラップトップ、小さな VPS にインストールしますか？調整済みの手順と、限られたハードウェアで何が期待できるかについては、[低リソース環境のセットアップ](/ja/guide/low-resource) を参照してください。
 
@@ -40,7 +41,7 @@ NVIDIA CUDA で高速化された背景除去、アップスケーリング、�
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) が必要です。CUDA が利用できない場合は自動的に CPU にフォールバックします。VA-API、Quick Sync、OpenCL を介した Intel/AMD iGPU アクセラレーションは、現時点では AI 推論に対応していません。ベンチマークについては [Docker Tags](/ja/guide/docker-tags) を参照してください。
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) が必要です。 CUDA が使用できない場合は、自動的に CPU にフォールバックします。現在、VA-API、Quick Sync、または OpenCL を介した Intel/AMD iGPU アクセラレーションは AI 推論ではサポートされていません。ベンチマークについては、[Docker タグ](/ja/guide/docker-tags) を参照してください。 `--gpus all` にもかかわらず AI ツールが CPU で実行される場合は、[GPU アクセラレーションを検証する](/ja/guide/deployment#verify-gpu-acceleration) を参照してください。
 :::
 
 ::: details GHCR でも利用可能
@@ -53,65 +54,31 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 
 ## Docker Compose {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+このページから短縮された Compose サンプルをコピーする代わりに、各リリースで保守およびテストされた実稼働ファイルを使用してください。
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-すべての環境変数については [設定](/ja/guide/configuration) を参照してください。
+正規の [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) には、4 つのランタイム ボリュームすべて、ヘルス チェック、リソース制限、耐久性のある Redis 構成、固定されたデータベース/キャッシュ イメージ、および現在のコンテナーの強化が含まれています。最初のログイン直後にデフォルトの管理者パスワードを変更します。再現可能な展開を行うには、`latest` をフォローする代わりに、SnapOtter アプリケーション イメージをリリース タグまたは確認したダイジェストに固定します。
+
+すべての環境変数については [構成](/ja/guide/configuration) を、シークレット、ネットワーク ポリシー、およびバックアップ ガイダンスについては [セキュリティと強化](/ja/guide/security) を参照してください。
 
 ## ソースからビルド {#build-from-source}
 
-**前提条件:** Node.js 22 以上、pnpm 9 以上、Docker（Postgres + Redis 用）、Python 3.10 以上（AI 機能用）、Git。
+**前提条件:** Node.js 22.22 以上、pnpm 9 以上、Docker（Postgres + Redis 用）、Python 3.10 以上（AI 機能用）、Git。
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- フロントエンド: [http://localhost:1349](http://localhost:1349)
+- フロントエンド: [http://localhost:1351](http://localhost:1351)
 - バックエンド: [http://localhost:13490](http://localhost:13490)
 
 ## できること {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | モダリティ | 数 | ツールの例 |
 |----------|-------|---------------|
-| **画像** | 105 | リサイズ、切り抜き、圧縮、変換、背景除去、アップスケール、OCR、透かし、コラージュ、カラー化、GIF ツール、フォーマットプリセット |
+| **画像** | 107 | リサイズ、切り抜き、圧縮、変換、背景除去、アップスケール、OCR、透かし、コラージュ、カラー化、GIF ツール、フォーマットプリセット |
 | **ビデオ** | 57 | トリミング、切り抜き、圧縮、変換、結合、オーディオ抽出、自動字幕、ビデオから GIF、リサイズ、手ブレ補正、フォーマットプリセット |
 | **オーディオ** | 27 | トリミング、結合、変換、正規化、ノイズ低減、文字起こし、ピッチシフト、フェード、着信音メーカー、フォーマットプリセット |
-| **PDF / ドキュメント** | 42 | 結合、分割、圧縮、OCR、透かし、墨消し、Word から PDF、Excel から PDF、回転、保護、修復 |
-| **ファイル** | 10 | CSV から JSON、JSON から XML、CSV の結合、CSV の分割、ZIP の作成、ZIP の展開、チャートメーカー、YAML/JSON |
+| **PDF / ドキュメント** | 29 | 結合、分割、圧縮、OCR、透かし、墨消し、Word から PDF、Excel から PDF、回転、保護、修復 |
+| **ファイル** | 23 | CSV から JSON、JSON から XML、CSV の結合、CSV の分割、ZIP の作成、ZIP の展開、チャートメーカー、YAML/JSON |
 
 ### パイプライン {#pipelines}
 

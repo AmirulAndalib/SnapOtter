@@ -38,7 +38,9 @@ services:
       - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-1000}
       - MAX_USERS=${MAX_USERS:-0}
       - SESSION_DURATION_HOURS=${SESSION_DURATION_HOURS:-168}
-      - TRUST_PROXY=${TRUST_PROXY:-true}
+      # Believe X-Forwarded-For only from a peer on a private network. Set to
+      # `true` only if a proxy you control sits in front on a public address.
+      - TRUST_PROXY=${TRUST_PROXY:-loopback,linklocal,uniquelocal}
       - DATABASE_URL=postgres://${POSTGRES_USER:-snapotter}:${POSTGRES_PASSWORD:-snapotter}@postgres:5432/${POSTGRES_DB:-snapotter}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-snapotter}@redis:6379
       # 1.x upgrade: uncomment to import the old SQLite database on first boot;
@@ -91,9 +93,10 @@ services:
       # signal a different-UID process, so docker stop is ungraceful
       # ("[FATAL tini] forwarding signal: Operation not permitted" -> SIGKILL).
       - KILL
-    # NOTE: security_opt: [no-new-privileges:true] is intentionally omitted.
-    # gosu requires setuid to drop from root to the snapotter user.
-    # Mitigation: cap_drop: ALL limits available capabilities after privilege drop.
+    # The entrypoint can still drop from root to the snapotter user while this
+    # prevents setuid binaries from granting privileges to untrusted processes.
+    security_opt:
+      - no-new-privileges:true
     # NOTE: read_only: true is not set because PUID/PGID remapping requires
     # writing to /etc/passwd and /etc/group. Consider using Docker --user flag
     # instead of PUID/PGID for read-only rootfs support.
@@ -118,7 +121,7 @@ services:
         max-file: "5"
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-snapotter}
@@ -134,8 +137,8 @@ services:
     cpus: 2
     pids_limit: 256
     # The official image starts as root and su-execs down to the postgres user,
-    # so setuid/setgid + chown caps are required. no-new-privileges and a
-    # read-only rootfs are omitted for the same privilege-drop reason as the app.
+    # so setuid/setgid + chown caps are required. A read-only rootfs is omitted
+    # because the entrypoint must initialize and adjust its data directory.
     cap_drop:
       - ALL
     cap_add:
@@ -144,6 +147,8 @@ services:
       - FOWNER
       - SETGID
       - SETUID
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-snapotter} -d ${POSTGRES_DB:-snapotter}"]
       interval: 10s
@@ -152,7 +157,7 @@ services:
       start_period: 15s
 
   redis:
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
     container_name: SnapOtter-redis
     command: >-
       redis-server
@@ -169,8 +174,8 @@ services:
     cpus: 2
     pids_limit: 256
     # The official image starts as root and gosu-drops to the redis user, so
-    # setuid/setgid + chown caps are required; no-new-privileges and a read-only
-    # rootfs are omitted for the same privilege-drop reason as the app.
+    # setuid/setgid + chown caps are required. A read-only rootfs is omitted
+    # because the entrypoint must initialize and adjust its data directory.
     cap_drop:
       - ALL
     cap_add:
@@ -179,6 +184,8 @@ services:
       - FOWNER
       - SETGID
       - SETUID
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-snapotter}", "--no-auth-warning", "ping"]
       interval: 10s

@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter의 로컬 개발 환경 설정, 명령어, 코드 규칙, 새 도구를 추가하는 방법."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: aa17bf7b9d5d
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: 6df1aea31133
+i18n_hash_version: 2
 ---
 
 # 개발자 가이드 {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: aa17bf7b9d5d
 
 ## 사전 요구사항 {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (로컬 Postgres + Redis, 컨테이너 빌드, AI 기능에 필요)
 - Git
 
-Python 3.10+는 AI/ML 사이드카(배경 제거, 업스케일링, OCR)를 작업하는 경우에만 필요합니다.
+Python 3.11+는 AI/ML 사이드카(배경 제거, 업스케일링, OCR)를 작업하는 경우에만 필요합니다.
 
 ## 설정 {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | 서비스  | URL                      | 비고                              |
 |----------|--------------------------|------------------------------------|
-| 프론트엔드 | http://localhost:1349     | Vite 개발 서버, /api 프록시      |
+| 프론트엔드 | http://localhost:1351     | Vite 개발 서버, /api 프록시      |
 | 백엔드  | http://localhost:13490    | Fastify API (프록시를 통해 접근)   |
 
-브라우저에서 http://localhost:1349를 여세요. `admin` / `admin`으로 로그인하세요. 첫 로그인 시 비밀번호를 변경하라는 안내가 표시됩니다.
+브라우저에서 http://localhost:1351를 여세요. `admin` / `admin`으로 로그인하세요. 첫 로그인 시 비밀번호를 변경하라는 안내가 표시됩니다.
 
 ## 프로젝트 구조 {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## 릴리스 버전 도메인 {#release-version-domains}
+
+SnapOtter에는 의도적으로 세 가지 버전 도메인이 있습니다. 릴리스 중에는 한 도메인을 다른 도메인으로 복사하지 마십시오.
+
+- 애플리케이션 릴리스 버전에는 루트 매니페스트, 모든 개인 작업 공간 패키지 및 `APP_VERSION`가 포함됩니다. Semantic-release는 이 값을 제공하고 `pnpm version:sync <version>`는 애플리케이션 릴리스 전에 모든 작업 공간을 업데이트합니다.
+- OpenAPI `info.version`는 안정적인 공개 API 주요 계약입니다. 모든 현지화된 사양은 호환되는 애플리케이션 릴리스를 위해 `<major>.0.0`에 유지되며 API 계약이 새로운 주요 버전으로 이동하는 경우에만 변경됩니다.
+- `docker/feature-manifest.json`는 `imageVersion: 2.0.0`를 불변의 레거시 기능 번들 스토리지 시대로 유지합니다. 해당 v2 아카이브 경로는 애플리케이션 패키지 버전이 아닙니다. Accurate OCR은 런타임 형식 v3을 사용하고 애플리케이션 릴리스 출처를 별도로 기록합니다.
+
+`tests/unit/infra/release-version-policy.test.ts`는 이러한 경계를 적용합니다. 새 버전 도메인 또는 마이그레이션은 해당 계약과 관련 아티팩트 마이그레이션 설계를 함께 업데이트해야 합니다.
+독립적인 API 및 레거시 번들 값은 `config/release-version-policy.json`에 있습니다. 애플리케이션 버전 동기화는 해당 정책 파일을 암시적으로 다시 작성해서는 안 됩니다.
 
 ## 환경 변수 {#environment-variables}
 

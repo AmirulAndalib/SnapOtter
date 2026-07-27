@@ -1,8 +1,9 @@
 ---
 description: "本地开发环境搭建、命令、代码约定，以及如何为 SnapOtter 添加新工具。"
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: c9c7c992d6d7
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: 064e6879f3bb
+i18n_hash_version: 2
 ---
 
 # 开发者指南 {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: c9c7c992d6d7
 
 ## 前置条件 {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+（`corepack enable && corepack prepare pnpm@latest --activate`）
 - [Docker](https://www.docker.com/)（本地 Postgres + Redis、容器构建和 AI 功能所必需）
 - Git
 
-仅当你在开发 AI/ML sidecar（背景移除、放大、OCR）时才需要 Python 3.10+。
+仅当你在开发 AI/ML sidecar（背景移除、放大、OCR）时才需要 Python 3.11+。
 
 ## 搭建环境 {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | 服务  | URL                      | 备注                              |
 |----------|--------------------------|------------------------------------|
-| 前端 | http://localhost:1349     | Vite 开发服务器，代理 /api      |
+| 前端 | http://localhost:1351     | Vite 开发服务器，代理 /api      |
 | 后端  | http://localhost:13490    | Fastify API（通过代理访问）   |
 
-在浏览器中打开 http://localhost:1349。使用 `admin` / `admin` 登录。首次登录时会提示你修改密码。
+在浏览器中打开 http://localhost:1351。使用 `admin` / `admin` 登录。首次登录时会提示你修改密码。
 
 ## 项目结构 {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## 发布版本域 {#release-version-domains}
+
+SnapOtter 有意具有三个版本域。发布期间请勿将一个域复制到另一个域：
+
+- 应用程序发布版本涵盖根清单、所有私有工作区包和 `APP_VERSION`。 Semantic-release 提供此值，`pnpm version:sync <version>` 在应用程序发布之前更新每个工作区。
+- OpenAPI `info.version` 是稳定的公开 API-主力合约。所有本地化规范都保留在 `<major>.0.0` 上以实现兼容的应用程序版本，并且仅当 API 合约转移到新的主要版本时才会更改。
+- `docker/feature-manifest.json` 保留 `imageVersion: 2.0.0` 作为不可变的旧功能包存储时代。这些 v2 存档路径不是应用程序包版本。准确的 OCR 使用运行时格式 v3 并单独记录其应用程序发布来源。
+
+`tests/unit/infra/release-version-policy.test.ts` 强制执行这些边界。新版本的域或迁移必须一起更新该合同和相关的工件迁移设计。
+独立的 API 和旧包值位于 `config/release-version-policy.json` 中；应用程序版本同步绝不能隐式重写该策略文件。
 
 ## 环境变量 {#environment-variables}
 

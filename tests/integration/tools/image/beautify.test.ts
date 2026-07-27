@@ -9,6 +9,7 @@
 
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { getToolConfig } from "../../../../apps/api/src/routes/tool-factory.js";
 import { fixtures, readFixture } from "../../../fixtures/index.js";
 import {
   buildTestApp,
@@ -769,6 +770,22 @@ describe("Beautify", () => {
     expect(meta.hasAlpha).toBe(true);
   });
 
+  it("pipeline image background without a second input falls back to transparent", async () => {
+    const config = getToolConfig("beautify");
+    if (!config) throw new Error("beautify must be registered");
+    const settings = config.settingsSchema.parse({
+      backgroundType: "image",
+      shadowPreset: "none",
+      padding: 20,
+    });
+
+    const result = await config.process(PNG, settings, "test.png");
+    const meta = await sharp(result.buffer).metadata();
+
+    expect(result.filename).toBe("test.png");
+    expect(meta.hasAlpha).toBe(true);
+  });
+
   it("shadow with zero padding (shadow extends beyond image)", async () => {
     const payload = createMultipartPayload([
       { name: "file", filename: "test.png", contentType: "image/png", content: PNG },
@@ -924,6 +941,19 @@ describe("Beautify", () => {
       {
         name: "settings",
         content: JSON.stringify({ shadowPreset: "custom", shadowBlur: 200 }),
+      },
+    ]);
+
+    const res = await post("/api/v1/tools/image/beautify", payload);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("empty custom shadow color returns 400 instead of reaching Sharp", async () => {
+    const payload = createMultipartPayload([
+      { name: "file", filename: "test.png", contentType: "image/png", content: PNG },
+      {
+        name: "settings",
+        content: JSON.stringify({ shadowPreset: "custom", shadowColor: "" }),
       },
     ]);
 

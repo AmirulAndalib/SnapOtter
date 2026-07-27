@@ -8,18 +8,20 @@
 # Stage 0: Static FFmpeg/FFprobe binaries
 # ============================================
 # Multi-arch (amd64 + arm64) static builds for video/audio processing.
-FROM mwader/static-ffmpeg:8.1.2 AS ffmpeg
+FROM mwader/static-ffmpeg:8.1.2@sha256:33f770f812cbfc3de96c547157fc9faf8bd95a36481753439ffa761045167585 AS ffmpeg
 
 # ============================================
 # Stage 0b: Static pdfcpu binary (pure Go, no CGO)
 # ============================================
 # CGO_ENABLED=0 produces a fully static binary; no cross-compiler needed.
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm@sha256:a1ae6b6c564f3e0072d70081036827a2705dbcf6b38aaa6d97f5de97fe9abdb4 AS pdfcpu-builder
+FROM --platform=$BUILDPLATFORM golang:1.25.12-bookworm@sha256:ea341baa9bd5ba6784f6d7161ace70544349a6242d54d34a0fbfd2c4d51c9d58 AS pdfcpu-builder
 ARG TARGETOS=linux
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go install github.com/pdfcpu/pdfcpu/cmd/pdfcpu@v0.13.0 \
-    && cp "$(find /go/bin -type f -name pdfcpu | head -1)" /tmp/pdfcpu
+WORKDIR /build
+COPY docker/go-tools/pdfcpu/go.mod docker/go-tools/pdfcpu/go.sum ./
+RUN go mod download all && go mod verify && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -mod=readonly -o /tmp/pdfcpu github.com/pdfcpu/pdfcpu/cmd/pdfcpu
 
 # ============================================
 # Stage 1: Build the frontend (Vite + React)
@@ -94,7 +96,7 @@ RUN --mount=type=cache,id=turbo-cache,target=/app/.turbo \
 # on Apple Silicon when cross-compiling for linux/amd64.
 # caire imports gioui.org/app which requires CGO on Linux, so we use a
 # proper C cross-compiler instead of CGO_ENABLED=0.
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm@sha256:a1ae6b6c564f3e0072d70081036827a2705dbcf6b38aaa6d97f5de97fe9abdb4 AS caire-builder
+FROM --platform=$BUILDPLATFORM golang:1.25.12-bookworm@sha256:ea341baa9bd5ba6784f6d7161ace70544349a6242d54d34a0fbfd2c4d51c9d58 AS caire-builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -132,25 +134,26 @@ RUN set -e; \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Build caire and stage to /tmp/caire (stable path for the COPY below).
-# Cross-compiled CGO binaries land in $GOPATH/bin/${GOOS}_${GOARCH}/ not $GOPATH/bin/.
+# Build caire from a repository-checksummed module graph. The explicit x/image
+# requirement lets us patch vulnerable transitive versions without unpinning caire.
+WORKDIR /build
+COPY docker/go-tools/caire/go.mod docker/go-tools/caire/go.sum ./
+RUN go mod download all && go mod verify
+
 RUN set -e; \
     NATIVE=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
     if [ "$TARGETARCH" = "$NATIVE" ]; then \
-        go install github.com/esimov/caire/cmd/caire@v1.5.0 && \
-        cp /go/bin/caire /tmp/caire; \
+        go build -trimpath -mod=readonly -o /tmp/caire github.com/esimov/caire/cmd/caire; \
     elif [ "$TARGETARCH" = "amd64" ]; then \
         CC=x86_64-linux-gnu-gcc \
         PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
         CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-            go install github.com/esimov/caire/cmd/caire@v1.5.0 && \
-        cp /go/bin/${TARGETOS}_${TARGETARCH}/caire /tmp/caire; \
+            go build -trimpath -mod=readonly -o /tmp/caire github.com/esimov/caire/cmd/caire; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
         CC=aarch64-linux-gnu-gcc \
         PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
         CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-            go install github.com/esimov/caire/cmd/caire@v1.5.0 && \
-        cp /go/bin/${TARGETOS}_${TARGETARCH}/caire /tmp/caire; \
+            go build -trimpath -mod=readonly -o /tmp/caire github.com/esimov/caire/cmd/caire; \
     fi
 
 # ============================================
@@ -173,8 +176,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libde265-dev libx265-dev libjpeg-dev libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL --retry 3 --retry-delay 5 "https://github.com/strukturag/libheif/releases/download/v${LIBHEIF_VERSION}/libheif-${LIBHEIF_VERSION}.tar.gz" \
-      | tar xz \
+RUN curl --fail --location --silent --show-error --retry 3 \
+      --proto '=https' --tlsv1.2 \
+      --output /tmp/libheif.tar.gz \
+      "https://github.com/strukturag/libheif/releases/download/v${LIBHEIF_VERSION}/libheif-${LIBHEIF_VERSION}.tar.gz" \
+    && printf '%s  %s\n' \
+      "75f530b7154bc93e7ecf846edfc0416bf5f490612de8c45983c36385aa742b42" \
+      /tmp/libheif.tar.gz | sha256sum --check --strict - \
+    && tar -xzf /tmp/libheif.tar.gz \
     && cmake -B build -S "libheif-${LIBHEIF_VERSION}" \
       -DCMAKE_INSTALL_PREFIX=/opt/libheif \
       -DWITH_EXAMPLES=ON \
@@ -186,8 +195,45 @@ RUN curl -fsSL --retry 3 --retry-delay 5 "https://github.com/strukturag/libheif/
     && cmake --install build
 
 # ============================================
+# Stage 2c: Build LibRaw (camera RAW decoder)
+# ============================================
+# Debian 12 ships LibRaw 0.20.2, which the Debian tracker marks vulnerable to
+# five unfixed advisories with no backport planned: CVE-2026-20884,
+# CVE-2026-24450 and CVE-2026-24660 (arbitrary code execution, CVSS 9.8) plus
+# CVE-2026-20889 and CVE-2026-21413. Trixie's 0.21.4 is still marked vulnerable,
+# so a base bump would not clear them; upstream fixed the set in 0.22.1.
+# dcraw_emu is the first-choice decoder for user-supplied camera RAW uploads
+# (decodeRaw in apps/api/src/lib/format-decoders.ts), which puts attacker bytes
+# straight into LibRaw, so both architectures build the fixed line from source
+# and the distro package is left out of the runtime entirely.
+# Base images match production to avoid shared-library ABI mismatches.
+ARG TARGETARCH
+FROM libheif-base-${TARGETARCH} AS libraw-builder
+
+ARG LIBRAW_VERSION=0.22.2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make curl ca-certificates pkg-config \
+    libjpeg-dev liblcms2-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --fail --location --silent --show-error --retry 3 \
+      --proto '=https' --tlsv1.2 \
+      --output /tmp/libraw.tar.gz \
+      "https://www.libraw.org/data/LibRaw-${LIBRAW_VERSION}.tar.gz" \
+    && printf '%s  %s\n' \
+      "de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa" \
+      /tmp/libraw.tar.gz | sha256sum --check --strict - \
+    && tar -xzf /tmp/libraw.tar.gz -C /tmp \
+    && cd "/tmp/LibRaw-${LIBRAW_VERSION}" \
+    && ./configure --prefix=/opt/libraw --disable-static \
+      --enable-openmp --enable-jpeg --enable-lcms \
+    && make -j"$(nproc)" \
+    && make install
+
+# ============================================
 # Stage 3: Platform-specific base images
-# Pin tags to specific major.minor for reproducible builds.
+# Pin tags to a stable upstream series; release digests provide artifact provenance.
 # ============================================
 FROM node:22-bookworm@sha256:5647be709086c696ff32edaaf1c70cd26d1da6ab2b39c32f3c7b4c4a31957e37 AS base-linux-arm64
 # CUDA base must match the remaining GPU AI bundles' torch/onnxruntime wheels
@@ -210,17 +256,15 @@ FROM base-${TARGETOS}-${TARGETARCH} AS production
 
 ARG TARGETARCH
 ARG PANDOC_VERSION=3.10
-ARG OCR_RUNTIME_INDEX_KEY_ID=
-ARG OCR_RUNTIME_INDEX_PUBLIC_KEY_PEM_B64=
+ARG OCR_RUNTIME_TRUST_ID=
+ARG OCR_RUNTIME_TRUST_PEM_B64=
 ARG SNAPOTTER_OFFICIAL_CONTAINER=0
 
-# Public release-verification key pinned independently from the bundle host.
-# Official release builds inject these repository variables and opt into the
-# exact ABI target. Source builds fail closed unless their operator explicitly
-# opts in and provides the same trust identity or mounts a trust file.
-ENV OCR_RUNTIME_INDEX_KEY_ID=${OCR_RUNTIME_INDEX_KEY_ID} \
-    OCR_RUNTIME_INDEX_PUBLIC_KEY_PEM_B64=${OCR_RUNTIME_INDEX_PUBLIC_KEY_PEM_B64} \
-    SNAPOTTER_OFFICIAL_CONTAINER=${SNAPOTTER_OFFICIAL_CONTAINER}
+# Official builds opt into the exact ABI target. Public release-verification
+# metadata is validated and written to the image trust store below rather than
+# exposed as image environment metadata. Runtime environment overrides remain
+# supported for self-hosters who intentionally supply a different trust key.
+ENV SNAPOTTER_OFFICIAL_CONTAINER=${SNAPOTTER_OFFICIAL_CONTAINER}
 
 # Pin corepack's cache during image build. It is removed after dependency and
 # browser installation so pnpm is not part of the production runtime surface.
@@ -249,7 +293,6 @@ RUN for i in 1 2 3; do apt-get -o Acquire::Retries=3 update && break || sleep $(
     tini \
     imagemagick \
     libjxl-tools \
-    libraw-dev libraw-bin \
     libopenexr-dev \
     potrace \
     ghostscript \
@@ -291,11 +334,16 @@ RUN for i in 1 2 3; do apt-get -o Acquire::Retries=3 update && break || sleep $(
          apt-get install -y --no-install-recommends libcublas-12-6; \
        fi \
     && case "$TARGETARCH" in \
-         amd64) PANDOC_ARCH=amd64 ;; \
-         arm64) PANDOC_ARCH=arm64 ;; \
+         amd64) PANDOC_ARCH=amd64; PANDOC_SHA256=d502599878eb29af3ae5f0cb5d559134df96534125d452c7a0674a5bad2c5ecf ;; \
+         arm64) PANDOC_ARCH=arm64; PANDOC_SHA256=b651c8bfd5a0a2f6650d6c0830131747ef67a1d9c0475b1399626611419e2205 ;; \
          *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
        esac \
-    && curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${PANDOC_ARCH}.deb" -o /tmp/pandoc.deb \
+    && curl --fail --location --silent --show-error --retry 3 \
+       --proto '=https' --tlsv1.2 \
+       --output /tmp/pandoc.deb \
+       "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${PANDOC_ARCH}.deb" \
+    && printf '%s  %s\n' "${PANDOC_SHA256}" /tmp/pandoc.deb \
+       | sha256sum --check --strict - \
     && apt-get install -y --no-install-recommends /tmp/pandoc.deb \
     && rm -f /tmp/pandoc.deb \
     && pandoc --version \
@@ -309,10 +357,22 @@ RUN for i in 1 2 3; do apt-get -o Acquire::Retries=3 update && break || sleep $(
 # multi-GB base. They enter the Trivy CVE surface and ride the existing
 # apt-get upgrade patching.
 RUN install -d /usr/share/postgresql-common/pgdg \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && curl --fail --location --silent --show-error --retry 3 \
+         --proto '=https' --tlsv1.2 \
+         https://www.postgresql.org/media/keys/ACCC4CF8.asc \
          -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    && curl -fsSL https://packages.redis.io/gpg \
+    && printf '%s  %s\n' \
+         "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76" \
+         /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+         | sha256sum --check --strict - \
+    && curl --fail --location --silent --show-error --retry 3 \
+         --proto '=https' --tlsv1.2 \
+         https://packages.redis.io/gpg \
          -o /usr/share/keyrings/redis-archive-keyring.asc \
+    && printf '%s  %s\n' \
+         "817b5a78358d00ed6b71884d70ad5d2eab9934badca1a34299fdc6a2e4a8ad20" \
+         /usr/share/keyrings/redis-archive-keyring.asc \
+         | sha256sum --check --strict - \
     && . /etc/os-release \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
@@ -325,25 +385,30 @@ RUN install -d /usr/share/postgresql-common/pgdg \
     && rm -rf /var/lib/apt/lists/*
 
 # s6-overlay supervises the embedded service tree (postgres + redis + app).
-# Pinned and checksum-verified against the upstream-published .sha256, consistent
-# with the repo's digest-pinning posture. For stricter supply-chain pinning,
-# replace the .sha256 fetch with a literal hash checked via
-# `echo "<hash>  <file>" | sha256sum -c -`.
+# Pinned and checksum-verified against repository-controlled literal hashes.
+# The values were independently matched against the upstream release assets.
 ARG S6_OVERLAY_VERSION=3.2.0.2
 RUN set -e; \
     case "$TARGETARCH" in \
-      amd64) S6_ARCH=x86_64 ;; \
-      arm64) S6_ARCH=aarch64 ;; \
+      amd64) S6_ARCH=x86_64; S6_ARCH_SHA256=59289456ab1761e277bd456a95e737c06b03ede99158beb24f12b165a904f478 ;; \
+      arm64) S6_ARCH=aarch64; S6_ARCH_SHA256=8b22a2eaca4bf0b27a43d36e65c89d2701738f628d1abd0cea5569619f66f785 ;; \
       *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac; \
     cd /tmp; \
     base="https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}"; \
-    for f in "s6-overlay-noarch.tar.xz" "s6-overlay-${S6_ARCH}.tar.xz"; do \
-      curl -fsSL -O "${base}/${f}"; \
-      curl -fsSL -O "${base}/${f}.sha256"; \
-      sha256sum -c "${f}.sha256"; \
-      tar -C / -Jxpf "${f}"; \
-    done; \
+    curl --fail --location --silent --show-error --retry 3 \
+      --proto '=https' --tlsv1.2 --output s6-overlay-noarch.tar.xz \
+      "${base}/s6-overlay-noarch.tar.xz"; \
+    printf '%s  %s\n' \
+      "6dbcde158a3e78b9bb141d7bcb5ccb421e563523babbe2c64470e76f4fd02dae" \
+      s6-overlay-noarch.tar.xz | sha256sum --check --strict -; \
+    curl --fail --location --silent --show-error --retry 3 \
+      --proto '=https' --tlsv1.2 --output "s6-overlay-${S6_ARCH}.tar.xz" \
+      "${base}/s6-overlay-${S6_ARCH}.tar.xz"; \
+    printf '%s  %s\n' "${S6_ARCH_SHA256}" "s6-overlay-${S6_ARCH}.tar.xz" \
+      | sha256sum --check --strict -; \
+    tar -C / -Jxpf s6-overlay-noarch.tar.xz; \
+    tar -C / -Jxpf "s6-overlay-${S6_ARCH}.tar.xz"; \
     rm -f /tmp/s6-overlay-*
 
 # Allow ImageMagick to use Ghostscript delegate for EPS (read for decode,
@@ -370,8 +435,20 @@ COPY --from=pdfcpu-builder /tmp/pdfcpu /usr/local/bin/pdfcpu
 # LD_LIBRARY_PATH ensures our custom 1.21.2 libs take precedence over distro libheif1.
 COPY --from=libheif-builder /opt/libheif/bin/ /usr/local/bin/
 COPY --from=libheif-builder /opt/libheif/lib/ /usr/local/lib/
+
+# LibRaw's dcraw_emu, built from source (see the libraw-builder stage). No
+# distro libraw is installed, so this is the only RAW decoder in the image.
+COPY --from=libraw-builder /opt/libraw/bin/dcraw_emu /usr/local/bin/
+COPY --from=libraw-builder /opt/libraw/lib/ /usr/local/lib/
 ENV LD_LIBRARY_PATH=/usr/local/lib
-RUN ldconfig
+
+# Assert the RAW decoder resolves to the source build and its runtime deps are
+# satisfied. Without this a missing shared library would only surface when a
+# user uploaded a RAW file, as a silent fall-through to the embedded preview.
+RUN ldconfig \
+    && [ "$(command -v dcraw_emu)" = "/usr/local/bin/dcraw_emu" ] \
+    && ldd /usr/local/bin/dcraw_emu | grep -Eq 'libraw\.so\.[0-9]+ => /usr/local/lib/' \
+    && dcraw_emu 2>&1 | grep -q 'dcraw emulator'
 
 # Python venv - Base packages (rarely change, cached aggressively)
 # Uses pre-built manylinux wheels where available; gcc/g++ above covers the rest.
@@ -411,6 +488,17 @@ RUN /opt/venv/bin/pip freeze | sha256sum | cut -d' ' -f1 > /opt/venv/.venv-versi
 # On-demand AI feature installer and manifest
 COPY docker/feature-manifest.json /app/docker/feature-manifest.json
 COPY packages/ai/python/install_feature.py /app/packages/ai/python/install_feature.py
+
+# Pin public OCR release trust independently from the bundle host. Source
+# builds without trust metadata stay unconfigured; official builds fail closed
+# unless both values are present, canonical, and identify an Ed25519 key.
+COPY docker/write-ocr-runtime-trust.mjs /tmp/write-ocr-runtime-trust.mjs
+RUN node /tmp/write-ocr-runtime-trust.mjs \
+      /app/docker/ocr-runtime-trust.json \
+      "${OCR_RUNTIME_TRUST_ID}" \
+      "${OCR_RUNTIME_TRUST_PEM_B64}" \
+      "${SNAPOTTER_OFFICIAL_CONTAINER}" \
+    && rm -f /tmp/write-ocr-runtime-trust.mjs
 
 WORKDIR /app
 
@@ -464,7 +552,6 @@ RUN apt-get purge -y --auto-remove \
         gcc \
         g++ \
         python3-dev \
-        libraw-dev \
         libopenexr-dev \
         libcurl4-openssl-dev \
         libdb-dev \
@@ -488,9 +575,14 @@ RUN apt-get purge -y --auto-remove \
         libtirpc-dev \
         rpcsvc-proto \
     && (corepack disable pnpm || true) \
-    && rm -rf /usr/local/share/corepack /root/.cache/node/corepack /root/.cache/pip \
-    && rm -f /usr/local/bin/pnpm /usr/local/bin/pnpx \
-    && rm -rf /var/lib/apt/lists/* /tmp/*
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+        /usr/local/share/corepack /root/.cache/node/corepack /root/.cache/pip \
+    && rm -f /usr/local/bin/corepack /usr/local/bin/npm /usr/local/bin/npx \
+        /usr/local/bin/pnpm /usr/local/bin/pnpx \
+    && rm -rf /var/lib/apt/lists/* /tmp/* \
+    # --auto-remove can take a shared library the source-built dcraw_emu needs
+    # (libgomp1, liblcms2-2) with it. Re-assert the decoder still runs.
+    && dcraw_emu 2>&1 | grep -q 'dcraw emulator'
 
 # Copy source code for API (tsx runs TS directly - no build step needed)
 COPY apps/api/src ./apps/api/src
@@ -556,7 +648,7 @@ ENV PORT=1349 \
     LOGIN_ATTEMPT_LIMIT=30 \
     LOG_LEVEL=info \
     LOG_DIR=/data/logs \
-    TRUST_PROXY=true \
+    TRUST_PROXY=loopback,linklocal,uniquelocal \
     OIDC_ENABLED=false \
     EXTERNAL_URL=
 

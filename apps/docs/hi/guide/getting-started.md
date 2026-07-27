@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter को एक ही कमांड में Docker के साथ इंस्टॉल करें। इसमें Docker Compose सेटअप, सोर्स से बिल्ड करना, और एक पूर्ण फ़ीचर अवलोकन शामिल है।"
-i18n_output_hash: bc1ecfa22bef
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: 16dd84c66bc6
+i18n_hash_version: 2
 ---
 
 # Getting Started {#getting-started}
@@ -17,7 +18,7 @@ i18n_provenance: human
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-यह एकल कंटेनर वह सब कुछ चलाता है जिसकी उसे ज़रूरत है: बिना कोई `DATABASE_URL` सेट किए, यह लूपबैक इंटरफ़ेस पर अपना खुद का PostgreSQL और Redis शुरू करता है (एंबेडेड मोड) और सारा डेटा `SnapOtter-data` वॉल्यूम में रखता है। यह SnapOtter को आज़माने या किसी homelab पर सेल्फ़-होस्ट करने का सबसे तेज़ तरीका है। प्रोडक्शन के लिए, नीचे दिया गया [Docker Compose](#docker-compose) स्टैक चलाएँ, जो PostgreSQL और Redis को उनके अपने कंटेनरों में रखता है। एंबेडेड मोड root के रूप में चलता है (डिफ़ॉल्ट) और जैसे ही आप `DATABASE_URL` सेट करते हैं, यह स्वचालित रूप से बंद हो जाता है।
+यह एकल कंटेनर वह सब कुछ चलाता है जिसकी उसे आवश्यकता होती है: बिना किसी `DATABASE_URL` सेट के, यह लूपबैक इंटरफ़ेस (एम्बेडेड मोड) पर अपना स्वयं का PostgreSQL और Redis शुरू करता है और सभी डेटा को `SnapOtter-data` वॉल्यूम में रखता है। यह होमलैब पर SnapOtter या सेल्फ-होस्ट आज़माने का सबसे तेज़ तरीका है। उत्पादन के लिए, [कैनोनिकल डॉकर कंपोज़ स्टैक](#docker-compose) का उपयोग करें, जो PostgreSQL और Redis को अपने कंटेनर में रखता है। एंबेडेड मोड रूट (डिफ़ॉल्ट) के रूप में चलता है और जैसे ही आप `DATABASE_URL` सेट करते हैं तो स्वचालित रूप से बंद हो जाता है।
 
 Raspberry Pi, किसी पुराने लैपटॉप, या छोटे VPS पर इंस्टॉल कर रहे हैं? ट्यून की गई वॉकथ्रू और सीमित हार्डवेयर से क्या अपेक्षा करें, इसके लिए [कम संसाधन वाले सेटअप](/hi/guide/low-resource) देखें।
 
@@ -40,7 +41,7 @@ NVIDIA CUDA-त्वरित पृष्ठभूमि हटाने, अ�
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) आवश्यक है। CUDA अनुपलब्ध होने पर स्वचालित रूप से CPU पर फ़ॉलबैक करता है। VA-API, Quick Sync, या OpenCL के माध्यम से Intel/AMD iGPU त्वरण आज AI इन्फ़रेंस के लिए सपोर्ट नहीं किया जाता। बेंचमार्क के लिए [Docker Tags](/hi/guide/docker-tags) देखें।
+[NVIDIA कंटेनर टूलकिट](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) की आवश्यकता है। CUDA अनुपलब्ध होने पर स्वचालित रूप से CPU पर वापस आ जाता है। वीए-एपीआई, क्विक सिंक या ओपनसीएल के माध्यम से इंटेल/एएमडी आईजीपीयू त्वरण आज एआई अनुमान के लिए समर्थित नहीं है। बेंचमार्क के लिए [डॉकर टैग](/hi/guide/docker-tags) देखें। यदि `--gpus all` के बावजूद AI उपकरण CPU पर चलते हैं, तो [GPU त्वरण सत्यापित करें](/hi/guide/deployment#verify-gpu-acceleration) देखें।
 :::
 
 ::: details GHCR पर भी
@@ -51,67 +52,33 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 दोनों रजिस्ट्री हर रिलीज़ पर वही इमेज प्रकाशित करती हैं।
 :::
 
-## Docker Compose {#docker-compose}
+## डॉकर कंपोज़ {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+इस पृष्ठ से संक्षिप्त कंपोज़ उदाहरण की प्रतिलिपि बनाने के बजाय प्रत्येक रिलीज़ के साथ बनाए और परीक्षण की गई उत्पादन फ़ाइल का उपयोग करें:
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-सभी एनवायरनमेंट वेरिएबल के लिए [Configuration](/hi/guide/configuration) देखें।
+कैनोनिकल [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) में सभी चार रनटाइम वॉल्यूम, स्वास्थ्य जांच, संसाधन सीमाएं, टिकाऊ रेडिस कॉन्फ़िगरेशन, पिन किए गए डेटाबेस/कैश छवियां और वर्तमान कंटेनर हार्डनिंग शामिल हैं। प्रथम लॉगिन के तुरंत बाद डिफ़ॉल्ट एडमिन पासवर्ड बदलें। प्रतिलिपि प्रस्तुत करने योग्य परिनियोजन के लिए, `latest` का अनुसरण करने के बजाय SnapOtter एप्लिकेशन छवि को रिलीज़ टैग पर पिन करें या आपके द्वारा सत्यापित डाइजेस्ट करें।
+
+सभी पर्यावरण चर के लिए [कॉन्फ़िगरेशन](/hi/guide/configuration) और रहस्यों, नेटवर्क नीति और बैकअप मार्गदर्शन के लिए [सुरक्षा और हार्डनिंग](/hi/guide/security) देखें।
 
 ## Build from Source {#build-from-source}
 
-**पूर्वापेक्षाएँ:** Node.js 22+, pnpm 9+, Docker (Postgres + Redis के लिए), Python 3.10+ (AI फ़ीचर के लिए), Git।
+**पूर्वापेक्षाएँ:** Node.js 22.22+, pnpm 9+, Docker (Postgres + Redis के लिए), Python 3.11+ (AI फ़ीचर के लिए), Git।
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- फ़्रंटएंड: [http://localhost:1349](http://localhost:1349)
+- फ़्रंटएंड: [http://localhost:1351](http://localhost:1351)
 - बैकएंड: [http://localhost:13490](http://localhost:13490)
 
 ## What You Can Do {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | मोडैलिटी | संख्या | उदाहरण टूल |
 |----------|-------|---------------|
-| **Image** | 105 | Resize, Crop, Compress, Convert, Remove Background, Upscale, OCR, Watermark, Collage, Colorize, GIF Tools, format presets |
+| **Image** | 107 | Resize, Crop, Compress, Convert, Remove Background, Upscale, OCR, Watermark, Collage, Colorize, GIF Tools, format presets |
 | **Video** | 57 | Trim, Crop, Compress, Convert, Merge, Extract Audio, Auto Subtitles, Video to GIF, Resize, Stabilize, format presets |
 | **Audio** | 27 | Trim, Merge, Convert, Normalize, Noise Reduction, Transcribe, Pitch Shift, Fade, Ringtone Maker, format presets |
-| **PDF / Document** | 42 | Merge, Split, Compress, OCR, Watermark, Redact, Word to PDF, Excel to PDF, Rotate, Protect, Repair |
-| **Files** | 10 | CSV to JSON, JSON to XML, Merge CSVs, Split CSV, Create ZIP, Extract ZIP, Chart Maker, YAML/JSON |
+| **PDF / Document** | 29 | Merge, Split, Compress, OCR, Watermark, Redact, Word to PDF, Excel to PDF, Rotate, Protect, Repair |
+| **Files** | 23 | CSV to JSON, JSON to XML, Merge CSVs, Split CSV, Create ZIP, Extract ZIP, Chart Maker, YAML/JSON |
 
 ### Pipelines {#pipelines}
 

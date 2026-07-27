@@ -1,6 +1,6 @@
 import { KeyRound } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { useTranslation } from "@/contexts/i18n-context";
 import { useAuth } from "@/hooks/use-auth";
 import { setToken } from "@/lib/api";
@@ -246,7 +246,7 @@ export function LoginPage() {
   };
 
   return (
-    <main className="flex h-dvh bg-background">
+    <main id="main-content" tabIndex={-1} className="flex h-dvh bg-background">
       <div className="flex-1 flex items-center justify-center p-8">
         <div className="w-full max-w-md space-y-8">
           <div>

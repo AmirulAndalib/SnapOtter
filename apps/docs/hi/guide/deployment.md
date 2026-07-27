@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter को Docker के साथ प्रोडक्शन में डिप्लॉय करें। हार्डवेयर आवश्यकताएँ, GPU सेटअप, और Nginx, Traefik, तथा Cloudflare के लिए रिवर्स प्रॉक्सी कॉन्फ़िग।"
-i18n_output_hash: 23f4f331a239
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: 839d9fc77083
+i18n_hash_version: 2
 ---
 
 # Deployment {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # गैर-स्थानीय तैनाती के लिए इसे बदलें
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
-लॉग में CUDA डिटेक्शन की जाँच करें:
+### GPU त्वरण सत्यापित करें {#verify-gpu-acceleration}
+
+लॉग में CUDA पहचान की जाँच करें:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+यदि `--gpus all` और NVIDIA कंटेनर टूलकिट सही तरीके से सेट होने के बावजूद AI उपकरण CPU पर चलते हैं, तो **सेटिंग्स → AI फीचर्स** से प्रभावित बंडल (उदाहरण के लिए बैकग्राउंड रिमूवल) को फिर से इंस्टॉल करें। इंस्टॉलर ONNX रनटाइम के GPU बिल्ड को पुनर्स्थापित करता है, जिसे केवल CPU बिल्ड किसी अन्य बंडल (जैसे ट्रांसक्रिप्शन) द्वारा खींचा जाता है अन्यथा साझा AI वातावरण में छाया कर सकता है। यदि यूआई से पुनः इंस्टॉल करने से पुरानी छवि पर जीपीयू बहाल नहीं होता है, तो [अंक #490](https://github.com/snapotter-hq/SnapOtter/issues/490) में मैन्युअल मरम्मत देखें।
 
 ## Hardware Requirements {#hardware-requirements}
 
@@ -436,11 +441,11 @@ securityContext:
 | `AUTH_ENABLED` | `true` | लॉगिन आवश्यकता सक्षम/अक्षम करें |
 | `DEFAULT_USERNAME` | `admin` | प्रारंभिक व्यवस्थापक उपयोगकर्ता नाम |
 | `DEFAULT_PASSWORD` | `admin` | प्रारंभिक व्यवस्थापक पासवर्ड (पहले लॉगिन पर बदलना अनिवार्य) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | प्रति-फ़ाइल अपलोड सीमा |
-| `MAX_BATCH_SIZE` | `100` | प्रति बैच अनुरोध अधिकतम फ़ाइलें |
+| `MAX_UPLOAD_SIZE_MB` | `0` (असीमित) | प्रति-फ़ाइल अपलोड सीमा MB में। इमेज `0` के साथ आती है; स्रोत से बनाया गया बिल्ड 100 से शुरू होता है |
+| `MAX_BATCH_SIZE` | `0` (असीमित) | प्रति बैच अनुरोध अधिकतम फ़ाइलें। इमेज `0` के साथ आती है; स्रोत से बनाया गया बिल्ड 100 से शुरू होता है |
 | `RATE_LIMIT_PER_MIN` | `1000` | प्रति IP प्रति मिनट API अनुरोध (अक्षम करने के लिए 0 सेट करें) |
 | `MAX_USERS` | `0` (असीमित) | अधिकतम उपयोगकर्ता खाते |
-| `TRUST_PROXY` | `true` | रिवर्स प्रॉक्सी से X-Forwarded-For हेडर पर भरोसा करें |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | `X-Forwarded-For` के ज़रिए क्लाइंट IP कौन से पीयर सेट कर सकते हैं। डिफ़ॉल्ट रूप से केवल निजी नेटवर्क |
 | `PUID` | `999` | इस UID के रूप में चलाएँ (बाइंड माउंट अनुमतियों के लिए) |
 | `PGID` | `999` | इस GID के रूप में चलाएँ (बाइंड माउंट अनुमतियों के लिए) |
 | `LOG_LEVEL` | `info` | लॉग वर्बोसिटी: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Reverse Proxy {#reverse-proxy}
 
-SnapOtter डिफ़ॉल्ट रूप से `TRUST_PROXY=true` सेट करता है ताकि रेट लिमिटिंग और लॉगिंग `X-Forwarded-For` हेडर से असली क्लाइंट IP का उपयोग करें।
+`TRUST_PROXY` का डिफ़ॉल्ट `loopback,linklocal,uniquelocal` है, इसलिए SnapOtter `X-Forwarded-For` पर तभी भरोसा करता है जब वह किसी निजी नेटवर्क के पीयर से आया हो। उसी होस्ट पर, किसी Docker नेटवर्क पर या आपके LAN पर मौजूद रिवर्स प्रॉक्सी शुरू से ही भरोसेमंद माना जाता है, यानी रेट लिमिटिंग, लॉगिन की ब्रूट-फ़ोर्स रोक, ऑडिट लॉग और enterprise संस्करण की IP अनुमति-सूची, सभी बिना किसी कॉन्फ़िगरेशन के असली क्लाइंट IP देखते हैं।
+
+`TRUST_PROXY=true` तभी सेट करें जब आगे लगा प्रॉक्सी SnapOtter तक किसी **सार्वजनिक** पते से पहुँचता हो, जैसे किसी दूसरे नेटवर्क का क्लाउड लोड बैलेंसर। सीधे उजागर इंस्टेंस पर यह मान `request.ip` को हमलावर के नियंत्रण में दे देता है, क्योंकि हेडर बदलता रहने वाला कॉलर हर अनुरोध पर नई रेट-लिमिट गिनती पा जाता है।
+
+क्लाइंट IP नापने से पहले दो बातें जान लें। macOS और Windows पर Docker Desktop प्रकाशित पोर्ट को यूज़रलैंड प्रॉक्सी के ज़रिए परोसता है, जो हर स्रोत पते को VM गेटवे `192.168.65.1` में बदल देता है; वहाँ `TRUST_PROXY` का कोई भी मान असली क्लाइंट वापस नहीं ला सकता, इसलिए इंटरनेट से जुड़ी हर चीज़ Linux पर तैनात करें। और किसी भी प्लेटफ़ॉर्म पर, प्रकाशित पोर्ट तक `localhost` से पहुँचना आपके क्लाइंट के बजाय ब्रिज गेटवे के रूप में दिखता है, इसलिए localhost से किया गया परीक्षण यह नहीं बताता कि असली क्लाइंट को कैसे गिना जाएगा। `TRUST_PROXY` के मानों की पूरी तालिका और Docker Desktop से जुड़ी चेतावनी [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy) में हैं।
+
+नीचे दी गई प्रत्येक प्रॉक्सी के लिए दो चीजें मायने रखती हैं: बड़े अनुरोध निकायों (अपलोड) की अनुमति दें, और प्रतिक्रियाओं को बफर न करें। एक प्रतिक्रिया-बफ़रिंग प्रॉक्सी SSE प्रगति को तोड़ देती है और, अधिक स्पष्ट रूप से, एक बड़ी फ़ाइल डाउनलोड को "शुरू लेकिन कभी ख़त्म नहीं" करती है, क्योंकि प्रॉक्सी इसे आगे बढ़ाने से पहले पूरी फ़ाइल को रखती है। SnapOtter डाउनलोड पर `X-Accel-Buffering: no` भेजता है इसलिए nginx उन्हें स्ट्रीम करता है, भले ही बफ़रिंग कहीं और छोड़ दी गई हो, लेकिन nginx के अलावा अन्य प्रॉक्सी को प्रतिक्रिया बफ़रिंग को स्पष्ट रूप से अक्षम करने की आवश्यकता होती है (नीचे प्रत्येक कॉन्फ़िगरेशन में दिखाया गया है)। यदि कोई डाउनलोड आंशिक रूप से रुक जाता है, तो सामने एक बफ़रिंग प्रॉक्सी जांचने वाली पहली चीज़ है।
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # बफ़रिंग के बजाय स्ट्रीम प्रतिक्रियाएँ: SSE प्रगति (बैच, AI, फ़ीचर इंस्टॉल) और बड़ी फ़ाइल डाउनलोड के लिए आवश्यक।
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` रिस्पॉन्स बफ़रिंग को अक्षम करता है, जो SSE प्रगति इवेंट (बैच प्रोसेसिंग, AI टूल, फ़ीचर इंस्टॉल) के लिए आवश्यक है। विस्तारित टाइमआउट बड़ी फ़ाइल अपलोड को Caddy द्वारा कनेक्शन जल्दी बंद किए बिना पूरा होने देते हैं।
+`flush_interval -1` प्रतिक्रिया बफरिंग को अक्षम कर देता है, जो SSE प्रगति घटनाओं (बैच प्रोसेसिंग, एआई टूल्स, फीचर इंस्टॉल) और बड़ी फ़ाइल डाउनलोड को रोकने के बजाय स्ट्रीम करने के लिए आवश्यक है। विस्तारित टाइमआउट Caddy कनेक्शन को जल्दी बंद किए बिना बड़ी फ़ाइल अपलोड को पूरा करने की अनुमति देता है।
 
 ### Cloudflare Tunnels {#cloudflare-tunnels}
 

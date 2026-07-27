@@ -20,10 +20,16 @@ export async function login(page: Page, username = "admin", password = "admin") 
 // ---------------------------------------------------------------------------
 let _testImagePath: string | null = null;
 
+export function getE2eRunRoot(): string {
+  const runRoot = process.env.PLAYWRIGHT_RUN_ROOT;
+  if (!runRoot) throw new Error("PLAYWRIGHT_RUN_ROOT was not initialized by playwright.config.ts");
+  return runRoot;
+}
+
 export function getTestImagePath(): string {
   if (_testImagePath && fs.existsSync(_testImagePath)) return _testImagePath;
 
-  const dir = path.join(process.cwd(), "test-results");
+  const dir = getE2eRunRoot();
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   _testImagePath = path.join(dir, "test-image.png");
@@ -226,25 +232,10 @@ export async function changePasswordViaApi(
 
 export const test = base.extend<{ loggedInPage: Page }>({
   loggedInPage: async ({ page }, use) => {
-    // storageState is already loaded by the project config, just navigate
+    // storageState is already loaded by the project config. Each Playwright
+    // invocation owns a fresh database, so this fixture must not mutate shared
+    // system settings before every test.
     await page.goto("/");
-    // Self-heal global server settings a crashed predecessor may have left
-    // mutated. defaultToolView=fullscreen would redirect "/"; a stale locale
-    // would translate the whole UI. loginAttemptLimit is the important one:
-    // saving System Settings persists it at the UI default ("5"), which
-    // overrides the env LOGIN_ATTEMPT_LIMIT=100000 and 429s every later admin
-    // login, cascading into "create user 401" failures across the serial run.
-    const healed = await putSettings(page, {
-      defaultToolView: "sidebar",
-      defaultLocale: "en",
-      loginAttemptLimit: "100000",
-    });
-    if (!healed.ok) {
-      console.warn(`loggedInPage settings heal failed with status ${healed.status}`);
-    }
-    if (page.url().includes("/fullscreen")) {
-      await page.goto("/");
-    }
     await use(page);
   },
 });
@@ -278,13 +269,10 @@ export async function openSettings(page: Page): Promise<void> {
   const width = page.viewportSize()?.width ?? 1280;
   if (width < 768) {
     // Mobile: Settings lives in the fixed bottom nav.
-    await page
-      .getByRole("button", { name: /settings/i })
-      .first()
-      .click();
+    await page.getByTestId("open-settings").click();
   } else {
     await page.getByTestId("user-menu").click();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByTestId("open-settings").click();
   }
   await page.getByRole("dialog").waitFor({ state: "visible", timeout: 5000 });
 }

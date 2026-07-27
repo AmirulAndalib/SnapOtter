@@ -79,7 +79,8 @@ const columns = [
     <!-- Brand column -->
     <div class="lg:col-span-1">
       <div class="flex items-center gap-2.5">
-        <img src="/logo.png" alt="SnapOtter" class="h-7 w-7" width="28" height="28" />
+        <!-- Decorative: the adjacent span already says SnapOtter. -->
+        <img src="/logo.png" alt="" class="h-7 w-7" width="28" height="28" />
         <span class="font-display text-lg font-bold">SnapOtter</span>
       </div>
       <p class="mt-3 text-sm leading-relaxed text-muted">
@@ -119,7 +120,11 @@ const columns = [
     <!-- Link columns -->
     {columns.map((col) => (
       <div>
-        <h4 class="text-sm font-semibold text-foreground">{col.title}</h4>
+        {/* h2, not h4. The footer is a contentinfo landmark and every page has one
+            h1, so starting its headings at level 2 never skips. As an h4 it skipped
+            a level on every page in the site: h2 to h4 on the content pages and h1
+            to h4 on the tool section pages. The size comes from the class either way. */}
+        <h2 class="text-sm font-semibold text-foreground">{col.title}</h2>
         <ul class="mt-4 space-y-2.5">
           {col.links.map((link) => (
             <li>
@@ -137,7 +142,11 @@ const columns = [
     ))}
   </div>
 
-  <!-- Featured-on badges -->
+  <!-- Featured-on badges. All three images are served from our own origin: a
+       hot-linked badge would hand the visitor's IP, Referer, and UA to the
+       badge host on every page view, and PostHog and Sentry are the only
+       destinations this project talks to. -->
+
   <div class="section-divider mx-auto mt-12 max-w-6xl"></div>
   <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-5 pt-8">
     <a href="https://twelve.tools" target="_blank" rel="noopener noreferrer" aria-label="Featured on Twelve Tools">
@@ -147,7 +156,7 @@ const columns = [
       <img src="/badges/wired-business.svg" alt="Featured on Wired Business" width="200" height="54" class="h-9 w-auto" />
     </a>
     <a href="https://lift-off.sh/p/snapotter" target="_blank" rel="noopener noreferrer" aria-label="Launched on LiftOff">
-      <img src="https://lift-off.sh/images/badges/badgeLaunchedLightBAR.webp" alt="Launched on LiftOff" width="360" height="120" class="h-9 w-auto" />
+      <img src="/badges/lift-off-launched.webp" alt="Launched on LiftOff" width="360" height="120" class="h-9 w-auto" />
     </a>
   </div>
 

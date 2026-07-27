@@ -1,8 +1,9 @@
 ---
 description: "Como contribuir com o SnapOtter. Relatórios de bugs, solicitações de recursos, pull requests e requisitos do CLA."
-i18n_source_hash: 528802503035
+i18n_source_hash: 6c920a5f83e0
 i18n_provenance: human
-i18n_output_hash: a6f10e198b99
+i18n_output_hash: 4ef406ec11e7
+i18n_hash_version: 2
 ---
 
 # Contribuindo {#contributing}
@@ -53,7 +54,7 @@ Se você está contribuindo em nome do seu empregador e ele detém os direitos d
 
 ### Pré-requisitos {#prerequisites}
 
-- Node.js 22+
+- Node.js 22.22+
 - pnpm 9+
 - Python 3.11+ (apenas para ferramentas de IA)
 - Docker (opcional, para testes de integração completos)
@@ -71,7 +72,7 @@ docker compose -f docker-compose.dev.yml up -d
 # Install dependencies
 pnpm install
 
-# Start dev servers (web on :1349, API on :13490)
+# Start dev servers (web on :1351, API on :13490)
 pnpm dev
 ```
 

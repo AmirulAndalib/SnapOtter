@@ -1,8 +1,9 @@
 ---
 description: "Tag image Docker SnapOtter, benchmark GPU, penyematan versi, dan dukungan multi-platform untuk AMD64 dan ARM64."
-i18n_output_hash: 1285488cc707
-i18n_source_hash: fda322e78b4b
+i18n_source_hash: 566e20ca07fc
 i18n_provenance: human
+i18n_output_hash: 30b4ac3f38a5
+i18n_hash_version: 2
 ---
 
 # Image Docker {#docker-image}
@@ -93,13 +94,13 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Ubah ini untuk penerapan non-lokal
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -140,9 +141,9 @@ Untuk akselerasi NVIDIA CUDA via Docker Compose, tambahkan bagian deploy ke laya
 | Tag | Deskripsi |
 |-----|------------|
 | `latest` | Rilis terbaru |
-| `1.11.0` | Versi persis |
-| `1.11` | Patch terbaru di 1.11.x |
-| `1` | Minor terbaru di 1.x |
+| `2.1.0` | Versi persis |
+| `2.1` | Patch terbaru di 2.1.x |
+| `2` | Minor terbaru di 2.x |
 
 ## Platform {#platforms}
 

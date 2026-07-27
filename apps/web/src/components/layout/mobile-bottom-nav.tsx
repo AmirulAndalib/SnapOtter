@@ -1,5 +1,5 @@
 import { FolderOpen, LayoutGrid, Settings as SettingsIcon, Workflow } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { useTranslation } from "@/contexts/i18n-context";
 import { ImageEditIcon } from "../common/image-edit-icon";
 
@@ -23,6 +23,7 @@ export function MobileBottomNav({ onSettingsClick }: MobileBottomNavProps) {
         <button
           type="button"
           onClick={onSettingsClick}
+          data-testid="open-settings"
           className="flex flex-col items-center gap-0.5 px-3 py-2 text-muted-foreground"
         >
           <SettingsIcon className="h-6 w-6" />

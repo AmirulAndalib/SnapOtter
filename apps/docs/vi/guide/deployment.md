@@ -1,8 +1,9 @@
 ---
 description: "Triển khai SnapOtter lên môi trường production với Docker. Yêu cầu phần cứng, cài đặt GPU, và cấu hình reverse proxy cho Nginx, Traefik, và Cloudflare."
-i18n_output_hash: 80f0326c4672
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: 661a8ffded8e
+i18n_hash_version: 2
 ---
 
 # Triển khai {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Thay đổi điều này cho việc triển khai không cục bộ
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
-Kiểm tra việc phát hiện CUDA trong log:
+### Xác minh khả năng tăng tốc GPU {#verify-gpu-acceleration}
+
+Kiểm tra phát hiện CUDA trong nhật ký:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+Nếu các công cụ AI chạy trên CPU ngay cả khi `--gpus all` và Bộ công cụ bộ chứa NVIDIA được thiết lập chính xác, hãy cài đặt lại gói bị ảnh hưởng (ví dụ: Xóa nền) từ **Cài đặt → Tính năng AI**. Trình cài đặt khôi phục bản dựng GPU của ONNX Runtime, bản dựng chỉ dành cho CPU được kéo vào bởi một gói khác (chẳng hạn như phiên mã) có thể bị che khuất trong môi trường AI được chia sẻ. Nếu việc cài đặt lại từ giao diện người dùng không khôi phục GPU trên hình ảnh cũ hơn, hãy xem cách sửa chữa thủ công trong [vấn đề #490](https://github.com/snapotter-hq/SnapOtter/issues/490).
 
 ## Yêu cầu phần cứng {#hardware-requirements}
 
@@ -436,11 +441,11 @@ Lỗi khi khởi động nêu tên chính xác UID cần dùng, nên con đườ
 | `AUTH_ENABLED` | `true` | Bật/tắt yêu cầu đăng nhập |
 | `DEFAULT_USERNAME` | `admin` | Tên người dùng quản trị ban đầu |
 | `DEFAULT_PASSWORD` | `admin` | Mật khẩu quản trị ban đầu (buộc đổi ở lần đăng nhập đầu tiên) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Giới hạn tải lên trên mỗi tập tin |
-| `MAX_BATCH_SIZE` | `100` | Số tập tin tối đa mỗi yêu cầu lô |
+| `MAX_UPLOAD_SIZE_MB` | `0` (không giới hạn) | Giới hạn tải lên trên mỗi tập tin tính bằng MB. Image xuất xưởng với `0`; bản dựng từ mã nguồn bắt đầu ở 100 |
+| `MAX_BATCH_SIZE` | `0` (không giới hạn) | Số tập tin tối đa mỗi yêu cầu lô. Image xuất xưởng với `0`; bản dựng từ mã nguồn bắt đầu ở 100 |
 | `RATE_LIMIT_PER_MIN` | `1000` | Số yêu cầu API mỗi phút trên mỗi IP (đặt 0 để tắt) |
 | `MAX_USERS` | `0` (không giới hạn) | Số tài khoản người dùng tối đa |
-| `TRUST_PROXY` | `true` | Tin cậy các header X-Forwarded-For từ reverse proxy |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Những peer nào được phép đặt IP của client qua `X-Forwarded-For`. Mặc định chỉ các mạng riêng |
 | `PUID` | `999` | Chạy dưới danh nghĩa UID này (cho quyền bind mount) |
 | `PGID` | `999` | Chạy dưới danh nghĩa GID này (cho quyền bind mount) |
 | `LOG_LEVEL` | `info` | Mức độ chi tiết của log: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Reverse Proxy {#reverse-proxy}
 
-SnapOtter mặc định đặt `TRUST_PROXY=true` để việc giới hạn tần suất và ghi log sử dụng IP client thực từ các header `X-Forwarded-For`.
+`TRUST_PROXY` mặc định là `loopback,linklocal,uniquelocal`, nên SnapOtter chỉ tin `X-Forwarded-For` khi nó đến từ một peer thuộc mạng riêng. Một reverse proxy trên cùng máy chủ, trên mạng Docker hoặc trong mạng LAN của bạn được tin cậy ngay từ đầu, nghĩa là việc giới hạn tần suất, bộ hạn chế dò mật khẩu khi đăng nhập, nhật ký kiểm toán và danh sách IP được phép của bản enterprise đều thấy IP thật của client mà không cần cấu hình gì.
+
+Chỉ đặt `TRUST_PROXY=true` khi proxy phía trước tiếp cận SnapOtter từ một địa chỉ **công khai**, chẳng hạn một bộ cân bằng tải trên đám mây nằm ở mạng khác. Trên một thực thể phơi ra trực tiếp, giá trị đó khiến `request.ip` nằm trong tay kẻ tấn công, vì người gọi liên tục đổi header sẽ có một bộ đếm giới hạn tần suất mới ở mỗi yêu cầu.
+
+Có hai điều cần biết trước khi bạn bắt tay đo IP của client. Docker Desktop trên macOS và Windows phục vụ cổng đã công bố thông qua một proxy ở không gian người dùng, nó viết lại mọi địa chỉ nguồn thành cổng vào của máy ảo `192.168.65.1`, nên ở đó không giá trị `TRUST_PROXY` nào lấy lại được client thật; hãy triển khai trên Linux với mọi thứ hướng ra internet. Và trên bất kỳ nền tảng nào, việc truy cập cổng đã công bố qua `localhost` được ghi nhận là cổng vào của cầu nối chứ không phải client của bạn, nên một phép thử qua localhost chẳng nói lên điều gì về cách một client thật được quy gán. Bảng đầy đủ các giá trị `TRUST_PROXY` và lưu ý về Docker Desktop nằm trong [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy).
+
+Hai điều quan trọng đối với mọi proxy bên dưới: cho phép nội dung yêu cầu lớn (tải lên) và không đệm phản hồi. Proxy đệm phản hồi sẽ phá vỡ tiến trình SSE và rõ ràng hơn là khiến quá trình tải xuống tệp lớn "bắt đầu nhưng không bao giờ kết thúc", vì proxy giữ toàn bộ tệp trước khi chuyển nó đi. SnapOtter gửi `X-Accel-Buffering: no` khi tải xuống để nginx truyền phát chúng ngay cả khi bộ đệm được để ở nơi khác, nhưng các proxy khác ngoài nginx cần tắt bộ đệm phản hồi một cách rõ ràng (hiển thị trong từng cấu hình bên dưới). Nếu quá trình tải xuống bị đình trệ giữa chừng, proxy đệm ở phía trước là điều đầu tiên cần kiểm tra.
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # Truyền phát phản hồi thay vì lưu vào bộ đệm: cần thiết cho tiến trình SSE (cài đặt hàng loạt, AI, tính năng) và để tải xuống tệp lớn.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` vô hiệu hóa việc đệm phản hồi, vốn cần thiết cho các sự kiện tiến trình SSE (xử lý lô, công cụ AI, cài đặt tính năng). Các thời gian chờ được kéo dài cho phép các tập tin lớn tải lên hoàn tất mà không bị Caddy đóng kết nối sớm.
+`flush_interval -1` vô hiệu hóa bộ đệm phản hồi, cần thiết cho các sự kiện tiến trình SSE (xử lý hàng loạt, công cụ AI, cài đặt tính năng) và để tải xuống tệp lớn để truyền phát thay vì bị đình trệ. Thời gian chờ kéo dài cho phép hoàn tất quá trình tải lên tệp lớn mà không cần Caddy đóng kết nối sớm.
 
 ### Cloudflare Tunnels {#cloudflare-tunnels}
 

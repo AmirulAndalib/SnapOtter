@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter में स्थानीय विकास सेटअप, कमांड, कोड परंपराएँ, और एक नया टूल कैसे जोड़ें।"
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: c6b1b3537584
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: feb4df3446de
+i18n_hash_version: 2
 ---
 
 # डेवलपर गाइड {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: c6b1b3537584
 
 ## पूर्वापेक्षाएँ {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (स्थानीय Postgres + Redis, कंटेनर बिल्ड, और AI फ़ीचर के लिए आवश्यक)
 - Git
 
-Python 3.10+ केवल तभी आवश्यक है जब आप AI/ML साइडकार (बैकग्राउंड हटाना, अपस्केलिंग, OCR) पर काम कर रहे हों।
+Python 3.11+ केवल तभी आवश्यक है जब आप AI/ML साइडकार (बैकग्राउंड हटाना, अपस्केलिंग, OCR) पर काम कर रहे हों।
 
 ## सेटअप {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | सेवा  | URL                      | नोट्स                              |
 |----------|--------------------------|------------------------------------|
-| फ़्रंटएंड | http://localhost:1349     | Vite डेव सर्वर, /api को प्रॉक्सी करता है      |
+| फ़्रंटएंड | http://localhost:1351     | Vite डेव सर्वर, /api को प्रॉक्सी करता है      |
 | बैकएंड  | http://localhost:13490    | Fastify API (प्रॉक्सी के माध्यम से एक्सेस)   |
 
-अपने ब्राउज़र में http://localhost:1349 खोलें। `admin` / `admin` के साथ लॉगिन करें। पहले लॉगिन पर आपको पासवर्ड बदलने के लिए कहा जाएगा।
+अपने ब्राउज़र में http://localhost:1351 खोलें। `admin` / `admin` के साथ लॉगिन करें। पहले लॉगिन पर आपको पासवर्ड बदलने के लिए कहा जाएगा।
 
 ## प्रोजेक्ट संरचना {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## रिलीज़ संस्करण डोमेन {#release-version-domains}
+
+SnapOtter में जानबूझकर तीन संस्करण डोमेन हैं। रिलीज़ के दौरान एक डोमेन को दूसरे में कॉपी न करें:
+
+- एप्लिकेशन रिलीज़ संस्करण रूट मेनिफेस्ट, सभी निजी कार्यक्षेत्र पैकेज और `APP_VERSION` को कवर करता है। Semantic-release यह मान प्रदान करता है, और `pnpm version:sync <version>` एप्लिकेशन रिलीज़ से पहले प्रत्येक कार्यक्षेत्र को अपडेट करता है।
+- OpenAPI `info.version` स्थिर सार्वजनिक API-प्रमुख अनुबंध है। संगत एप्लिकेशन रिलीज़ के लिए सभी स्थानीयकृत विनिर्देश `<major>.0.0` पर बने रहते हैं और केवल तभी बदलते हैं जब API अनुबंध एक नए प्रमुख संस्करण में चला जाता है।
+- `docker/feature-manifest.json`, `imageVersion: 2.0.0` को अपरिवर्तनीय विरासत सुविधा-बंडल भंडारण युग के रूप में रखता है। वे v2 संग्रह पथ एप्लिकेशन पैकेज संस्करण नहीं हैं। सटीक OCR रनटाइम प्रारूप v3 का उपयोग करता है और इसके एप्लिकेशन रिलीज़ उद्गम को अलग से रिकॉर्ड करता है।
+
+`tests/unit/infra/release-version-policy.test.ts` इन सीमाओं को लागू करता है। एक नए संस्करण डोमेन या माइग्रेशन को उस अनुबंध और प्रासंगिक आर्टिफैक्ट माइग्रेशन डिज़ाइन को एक साथ अपडेट करना होगा।
+स्वतंत्र API और लीगेसी-बंडल मान `config/release-version-policy.json` में रहते हैं; एप्लिकेशन संस्करण सिंक्रोनाइज़ेशन को कभी भी उस नीति फ़ाइल को परोक्ष रूप से दोबारा नहीं लिखना चाहिए।
 
 ## एनवायरनमेंट वेरिएबल {#environment-variables}
 

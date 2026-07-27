@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { TemplatesSection } from "@/components/automate/templates-section";
 import { BeforeAfterSlider } from "@/components/common/before-after-slider";
 import { Dropzone } from "@/components/common/dropzone";
@@ -710,6 +710,7 @@ export function AutomatePage() {
           <button
             type="button"
             onClick={() => setMobileToolPaletteOpen(true)}
+            aria-label={t.automate.addTool}
             className="fixed bottom-24 right-4 z-20 w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center hover:bg-primary/90 active:scale-95 transition-transform"
           >
             <Plus className="h-6 w-6" />

@@ -1,8 +1,9 @@
 ---
 description: "用一道 Docker 指令安裝 SnapOtter。包含 Docker Compose 設定、從原始碼建置，以及完整功能總覽。"
-i18n_output_hash: 4e12779bd211
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: c2b2ed21e05f
+i18n_hash_version: 2
 ---
 
 # 快速上手 {#getting-started}
@@ -17,7 +18,7 @@ i18n_provenance: human
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-這個單一容器會執行它所需的一切：在未設定 `DATABASE_URL` 的情況下，它會在 loopback 介面上啟動自己的 PostgreSQL 和 Redis（嵌入模式），並將所有資料保存在 `SnapOtter-data` 磁碟區中。這是試用 SnapOtter 或在家用實驗室自我託管的最快方式。就正式環境而言，請執行下方的 [Docker Compose](#docker-compose) 堆疊，它會將 PostgreSQL 和 Redis 保留在各自的容器中。嵌入模式以 root（預設值）執行，並在你設定 `DATABASE_URL` 後自動關閉。
+這個單一容器運行它所需的一切：在沒有設定 `DATABASE_URL` 的情況下，它在環回介面（嵌入模式）上啟動自己的 PostgreSQL 和 Redis，並將所有資料保存在 `SnapOtter-data` 卷中。這是在家庭實驗室上嘗試 SnapOtter 或自架網站的最快方法。對於生產，請使用[規範的 Docker Compose 堆疊](#docker-compose)，它將 PostgreSQL 和 Redis 保留在自己的容器中。嵌入模式以 root 身份運行（預設），並在您設定 `DATABASE_URL` 後自動關閉。
 
 要安裝在 Raspberry Pi、舊筆電或小型 VPS 上？請參閱[低資源環境部署](/zh-TW/guide/low-resource)，取得調校過的逐步教學，並了解受限硬體能有什麼表現。
 
@@ -40,7 +41,7 @@ SnapOtter 預設包含匿名產品分析。若要關閉它，請開啟 **Setting
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-需要 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。當 CUDA 不可用時會自動回退至 CPU。目前不支援透過 VA-API、Quick Sync 或 OpenCL 進行 Intel/AMD iGPU 加速的 AI 推論。效能測試請參閱 [Docker Tags](/zh-TW/guide/docker-tags)。
+需要 [NVIDIA 容器工具包](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。當 CUDA 不可用時自動回退到 CPU。目前，AI 推理不支援透過 VA-API、Quick Sync 或 OpenCL 進行 Intel/AMD iGPU 加速。請參閱 [Docker 標籤](/zh-TW/guide/docker-tags) 以了解基準。如果 AI 工具在 CPU 上運作（儘管 `--gpus all`），請參閱[驗證 GPU 加速](/zh-TW/guide/deployment#verify-gpu-acceleration)。
 :::
 
 ::: details 也在 GHCR 上
@@ -51,67 +52,33 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 兩個登錄檔在每次發行時都會發布相同的映像檔。
 :::
 
-## Docker Compose {#docker-compose}
+## Docker 編寫 {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+使用每個版本維護和測試的生產文件，而不是從此頁面複製縮寫的 Compose 範例：
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-關於所有環境變數，請參閱 [Configuration](/zh-TW/guide/configuration)。
+規範的 [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) 包括所有四個運行時卷、運行狀況檢查、資源限制、持久性 Redis 配置、固定資料庫/快取映像以及當前容器強化。首次登入後立即變更預設管理員密碼。對於可重現的部署，請將 SnapOtter 應用程式映像固定到您驗證的發布標籤或摘要，而不是遵循 `latest`。
+
+有關所有環境變量，請參閱[配置](/zh-TW/guide/configuration)；有關機密、網路策略和備份指南，請參閱[安全性和強化](/zh-TW/guide/security)。
 
 ## 從原始碼建置 {#build-from-source}
 
-**先決條件：** Node.js 22+、pnpm 9+、Docker（用於 Postgres + Redis）、Python 3.10+（用於 AI 功能）、Git。
+**先決條件：** Node.js 22.22+、pnpm 9+、Docker（用於 Postgres + Redis）、Python 3.11+（用於 AI 功能）、Git。
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- 前端：[http://localhost:1349](http://localhost:1349)
+- 前端：[http://localhost:1351](http://localhost:1351)
 - 後端：[http://localhost:13490](http://localhost:13490)
 
 ## 你可以做什麼 {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | 模態 | 數量 | 範例工具 |
 |----------|-------|---------------|
-| **影像** | 105 | 調整大小、裁切、壓縮、轉換、去背、放大、OCR、浮水印、拼貼、上色、GIF 工具、格式預設 |
+| **影像** | 107 | 調整大小、裁切、壓縮、轉換、去背、放大、OCR、浮水印、拼貼、上色、GIF 工具、格式預設 |
 | **影片** | 57 | 修剪、裁切、壓縮、轉換、合併、擷取音訊、自動字幕、影片轉 GIF、調整大小、穩定化、格式預設 |
 | **音訊** | 27 | 修剪、合併、轉換、正規化、雜訊抑制、轉錄、音高變換、淡入淡出、鈴聲製作、格式預設 |
-| **PDF / 文件** | 42 | 合併、分割、壓縮、OCR、浮水印、遮蔽、Word 轉 PDF、Excel 轉 PDF、旋轉、保護、修復 |
-| **檔案** | 10 | CSV 轉 JSON、JSON 轉 XML、合併 CSV、分割 CSV、建立 ZIP、解壓縮 ZIP、圖表製作、YAML/JSON |
+| **PDF / 文件** | 29 | 合併、分割、壓縮、OCR、浮水印、遮蔽、Word 轉 PDF、Excel 轉 PDF、旋轉、保護、修復 |
+| **檔案** | 23 | CSV 轉 JSON、JSON 轉 XML、合併 CSV、分割 CSV、建立 ZIP、解壓縮 ZIP、圖表製作、YAML/JSON |
 
 ### 管線 {#pipelines}
 

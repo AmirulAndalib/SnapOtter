@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter 的本機開發環境設定、指令、程式碼慣例，以及如何新增工具。"
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 64a00be99b89
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: d94d76633902
+i18n_hash_version: 2
 ---
 
 # 開發者指南 {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: 64a00be99b89
 
 ## 先決條件 {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+（`corepack enable && corepack prepare pnpm@latest --activate`）
 - [Docker](https://www.docker.com/)（本機 Postgres + Redis、容器建置與 AI 功能所必需）
 - Git
 
-只有在你要處理 AI/ML 附屬程序（去背、放大、OCR）時，才需要 Python 3.10+。
+只有在你要處理 AI/ML 附屬程序（去背、放大、OCR）時，才需要 Python 3.11+。
 
 ## 設定 {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | 服務  | URL                      | 說明                              |
 |----------|--------------------------|------------------------------------|
-| 前端 | http://localhost:1349     | Vite 開發伺服器，代理 /api      |
+| 前端 | http://localhost:1351     | Vite 開發伺服器，代理 /api      |
 | 後端  | http://localhost:13490    | Fastify API（透過代理存取）   |
 
-在瀏覽器中開啟 http://localhost:1349。以 `admin` / `admin` 登入。你會在首次登入時被提示變更密碼。
+在瀏覽器中開啟 http://localhost:1351。以 `admin` / `admin` 登入。你會在首次登入時被提示變更密碼。
 
 ## 專案結構 {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## 發布版本域 {#release-version-domains}
+
+SnapOtter 有意有三個版本域。發佈期間請勿將一個網域複製到另一個網域：
+
+- 應用程式發布版本涵蓋根清單、所有私人工作區包和 `APP_VERSION`。 Semantic-release 提供此值，`pnpm version:sync <version>` 在應用程式發布之前更新每個工作區。
+- OpenAPI `info.version` 是穩定的公開 API-主力合約。所有本地化規範都保留在 `<major>.0.0` 上以實現相容的應用程式版本，並且僅當 API 合約轉移到新的主要版本時才會更改。
+- `docker/feature-manifest.json` 保留 `imageVersion: 2.0.0` 作為不可變的舊功能包儲存時代。這些 v2 存檔路徑不是應用程式套件版本。準確的 OCR 使用運行時格式 v3 並單獨記錄其應用程式發布來源。
+
+`tests/unit/infra/release-version-policy.test.ts` 強制執行這些邊界。新版本的網域或遷移必須一起更新該合約和相關的工件遷移設計。
+獨立的 API 和舊套件值位於 `config/release-version-policy.json` 中；應用程式版本同步絕對不能隱含重寫該原則檔。
 
 ## 環境變數 {#environment-variables}
 

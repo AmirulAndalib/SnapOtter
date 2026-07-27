@@ -1,8 +1,9 @@
 ---
 description: "Deploy SnapOtter ke produksi dengan Docker. Persyaratan perangkat keras, penyiapan GPU, dan konfigurasi reverse proxy untuk Nginx, Traefik, dan Cloudflare."
-i18n_output_hash: 5ed614569b73
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: 5f4c54af9c3d
+i18n_hash_version: 2
 ---
 
 # Deployment {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Ubah ini untuk penerapan non-lokal
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
+### Verifikasi akselerasi GPU {#verify-gpu-acceleration}
+
 Periksa deteksi CUDA di log:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+Jika alat AI berjalan di CPU meskipun `--gpus all` dan NVIDIA Container Toolkit telah dikonfigurasi dengan benar, instal ulang bundel yang terpengaruh (misalnya Penghapusan Latar Belakang) dari **Pengaturan → Fitur AI**. Penginstal memulihkan build GPU ONNX Runtime, yang mana build khusus CPU yang ditarik oleh bundel lain (seperti transkripsi) dapat membayangi lingkungan AI bersama. Jika menginstal ulang dari UI tidak memulihkan GPU pada image lama, lihat perbaikan manual di [masalah #490](https://github.com/snapotter-hq/SnapOtter/issues/490).
 
 ## Persyaratan Perangkat Keras {#hardware-requirements}
 
@@ -436,11 +441,11 @@ Kesalahan startup menyebutkan UID persis yang harus digunakan, jadi jalur tercep
 | `AUTH_ENABLED` | `true` | Aktifkan/nonaktifkan persyaratan login |
 | `DEFAULT_USERNAME` | `admin` | Username admin awal |
 | `DEFAULT_PASSWORD` | `admin` | Kata sandi admin awal (dipaksa ganti saat login pertama) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Batas unggahan per file |
-| `MAX_BATCH_SIZE` | `100` | Maksimum file per permintaan batch |
+| `MAX_UPLOAD_SIZE_MB` | `0` (tak terbatas) | Batas unggahan per file dalam MB. Image dikirim dengan `0`; build dari kode sumber mulai dari 100 |
+| `MAX_BATCH_SIZE` | `0` (tak terbatas) | Maksimum file per permintaan batch. Image dikirim dengan `0`; build dari kode sumber mulai dari 100 |
 | `RATE_LIMIT_PER_MIN` | `1000` | Permintaan API per menit per IP (atur 0 untuk menonaktifkan) |
 | `MAX_USERS` | `0` (tak terbatas) | Maksimum akun pengguna |
-| `TRUST_PROXY` | `true` | Percayai header X-Forwarded-For dari reverse proxy |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Peer mana yang boleh menetapkan IP klien lewat `X-Forwarded-For`. Hanya jaringan privat secara default |
 | `PUID` | `999` | Jalankan sebagai UID ini (untuk izin bind mount) |
 | `PGID` | `999` | Jalankan sebagai GID ini (untuk izin bind mount) |
 | `LOG_LEVEL` | `info` | Verbositas log: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Reverse Proxy {#reverse-proxy}
 
-SnapOtter mengatur `TRUST_PROXY=true` secara default sehingga pembatasan laju dan logging menggunakan IP klien sebenarnya dari header `X-Forwarded-For`.
+`TRUST_PROXY` secara default bernilai `loopback,linklocal,uniquelocal`, jadi SnapOtter hanya memercayai `X-Forwarded-For` dari peer di jaringan privat. Reverse proxy di host yang sama, di jaringan Docker, atau di LAN Anda langsung dipercaya, sehingga pembatasan laju, pembatas brute force pada login, log audit, dan daftar IP yang diizinkan di edisi enterprise semuanya melihat IP klien yang sebenarnya tanpa konfigurasi apa pun.
+
+Setel `TRUST_PROXY=true` hanya jika proxy di depan menjangkau SnapOtter dari alamat **publik**, misalnya load balancer cloud di jaringan lain. Pada instance yang terekspos langsung, nilai itu membuat `request.ip` dikendalikan penyerang, karena pemanggil yang terus mengganti header mendapat penghitung batas laju baru di setiap permintaan.
+
+Ada dua hal yang perlu diketahui sebelum Anda mulai mengukur IP klien. Docker Desktop di macOS dan Windows menyajikan port yang dipublikasikan lewat proxy di ruang pengguna yang menulis ulang setiap alamat sumber menjadi gateway VM `192.168.65.1`, jadi di sana tidak ada nilai `TRUST_PROXY` yang bisa mengembalikan klien aslinya; terapkan di Linux untuk apa pun yang menghadap internet. Dan di platform mana pun, mencapai port yang dipublikasikan lewat `localhost` terlihat sebagai gateway bridge, bukan sebagai klien Anda, sehingga uji coba lewat localhost tidak memberi tahu apa pun tentang cara klien sungguhan diatribusikan. Tabel lengkap nilai `TRUST_PROXY` dan catatan tentang Docker Desktop ada di [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy).
+
+Ada dua hal yang penting untuk setiap proxy di bawah ini: izinkan badan permintaan yang besar (unggahan), dan jangan melakukan buffering terhadap tanggapan. Proksi buffering respons menghentikan kemajuan SSE dan, yang lebih terlihat, membuat pengunduhan file besar "mulai tetapi tidak pernah selesai", karena proksi menyimpan seluruh file sebelum meneruskannya. SnapOtter mengirimkan `X-Accel-Buffering: no` pada unduhan sehingga nginx mengalirkannya meskipun buffering dibiarkan di tempat lain, namun proxy selain nginx memerlukan buffering respons yang dinonaktifkan secara eksplisit (ditunjukkan pada setiap konfigurasi di bawah). Jika pengunduhan terhenti di tengah jalan, proxy buffering di depan adalah hal pertama yang harus diperiksa.
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # Respons streaming alih-alih buffering: diperlukan untuk kemajuan SSE (batch, AI, pemasangan fitur) dan untuk download file besar.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` menonaktifkan buffering respons, yang diperlukan untuk event progres SSE (pemrosesan batch, perkakas AI, instalasi fitur). Timeout yang diperpanjang memungkinkan unggahan file besar selesai tanpa Caddy menutup koneksi terlalu dini.
+`flush_interval -1` menonaktifkan buffering respons, yang diperlukan untuk peristiwa kemajuan SSE (pemrosesan batch, alat AI, pemasangan fitur) dan untuk pengunduhan file besar agar dapat dilakukan streaming alih-alih terhenti. Batas waktu yang diperpanjang memungkinkan pengunggahan file besar selesai tanpa Caddy menutup koneksi lebih awal.
 
 ### Cloudflare Tunnels {#cloudflare-tunnels}
 

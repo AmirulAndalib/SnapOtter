@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Crop } from "react-image-crop";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router";
 import { BeforeAfterSlider } from "@/components/common/before-after-slider";
 import { BottomSheet } from "@/components/common/bottom-sheet";
 import { Dropzone } from "@/components/common/dropzone";
@@ -219,13 +219,13 @@ function FileSelectionInfo({
 
 export function ToolPage() {
   const { t } = useTranslation();
-  const { toolId } = useParams<{ toolId: string }>();
+  const { section, toolId } = useParams<{ section: string; toolId: string }>();
   const location = useLocation();
-  const tool = useMemo(() => TOOLS.find((t) => t.id === toolId), [toolId]);
-  const registryEntry = useMemo(
-    () => (toolId ? getToolRegistryEntry(toolId) : undefined),
-    [toolId],
+  const tool = useMemo(
+    () => TOOLS.find((t) => t.id === toolId && t.route === `/${section}/${toolId}`),
+    [section, toolId],
   );
+  const registryEntry = useMemo(() => (tool ? getToolRegistryEntry(tool.id) : undefined), [tool]);
   const isAiTool = toolId ? (PYTHON_SIDECAR_TOOLS as readonly string[]).includes(toolId) : false;
   const featuresLoaded = useFeaturesStore((s) => s.loaded);
   const featureBundles = useFeaturesStore((s) => s.bundles);
@@ -555,7 +555,7 @@ export function ToolPage() {
     URL.revokeObjectURL(url);
   }, [batchZipBlob, batchZipFilename]);
 
-  if (toolId && TOOLS.some((tt) => tt.id === toolId) && disabledTools.includes(toolId)) {
+  if (tool && disabledTools.includes(tool.id)) {
     return (
       <AppLayout>
         <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground">
@@ -1373,7 +1373,13 @@ export function ToolPage() {
             {liveMessage}
           </div>
           <div
-            key={hasProcessed ? `processed-${selectedIndex}` : `pending-${selectedIndex}`}
+            key={
+              hasProcessed
+                ? `processed-${selectedIndex}`
+                : displayMode === "interactive-eraser"
+                  ? "pending-eraser"
+                  : `pending-${selectedIndex}`
+            }
             className={`flex-1 relative flex items-center justify-center p-6 min-h-0 min-w-0 ${hasProcessed ? "animate-fade-in" : ""}${isProcessing ? " animate-pulse" : ""}`}
           >
             {renderNavArrows()}

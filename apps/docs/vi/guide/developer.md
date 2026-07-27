@@ -1,8 +1,9 @@
 ---
 description: "Thiết lập môi trường phát triển cục bộ, lệnh, quy ước mã, và cách thêm một công cụ mới vào SnapOtter."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 76e4e13bc933
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: 7ce3a1183f27
+i18n_hash_version: 2
 ---
 
 # Hướng dẫn dành cho nhà phát triển {#developer-guide}
@@ -11,12 +12,12 @@ Cách thiết lập một môi trường phát triển cục bộ và đóng gó
 
 ## Điều kiện tiên quyết {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (bắt buộc cho Postgres + Redis cục bộ, dựng container, và các tính năng AI)
 - Git
 
-Python 3.10+ chỉ cần thiết nếu bạn đang làm việc trên sidecar AI/ML (xóa nền, phóng đại, OCR).
+Python 3.11+ chỉ cần thiết nếu bạn đang làm việc trên sidecar AI/ML (xóa nền, phóng đại, OCR).
 
 ## Thiết lập {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | Dịch vụ  | URL                      | Ghi chú                              |
 |----------|--------------------------|------------------------------------|
-| Frontend | http://localhost:1349     | Máy chủ dev Vite, proxy /api      |
+| Frontend | http://localhost:1351     | Máy chủ dev Vite, proxy /api      |
 | Backend  | http://localhost:13490    | API Fastify (truy cập qua proxy)   |
 
-Mở http://localhost:1349 trong trình duyệt của bạn. Đăng nhập bằng `admin` / `admin`. Bạn sẽ được nhắc đổi mật khẩu ở lần đăng nhập đầu tiên.
+Mở http://localhost:1351 trong trình duyệt của bạn. Đăng nhập bằng `admin` / `admin`. Bạn sẽ được nhắc đổi mật khẩu ở lần đăng nhập đầu tiên.
 
 ## Cấu trúc dự án {#project-structure}
 
@@ -219,6 +220,17 @@ Dùng các cache mount BuildKit để dựng lại nhanh hơn:
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## Tên miền phiên bản phát hành {#release-version-domains}
+
+SnapOtter cố ý có ba miền phiên bản. Không sao chép tên miền này sang tên miền khác trong quá trình phát hành:
+
+- Phiên bản phát hành ứng dụng bao gồm tệp kê khai gốc, tất cả các gói không gian làm việc riêng tư và `APP_VERSION`. Semantic-release cung cấp giá trị này và `pnpm version:sync <version>` cập nhật mọi không gian làm việc trước khi phát hành ứng dụng.
+- OpenAPI `info.version` là hợp đồng chính API công cộng ổn định. Tất cả các thông số kỹ thuật được bản địa hóa vẫn có trên `<major>.0.0` cho các bản phát hành ứng dụng tương thích và chỉ thay đổi khi hợp đồng API chuyển sang phiên bản chính mới.
+- `docker/feature-manifest.json` giữ `imageVersion: 2.0.0` là kỷ nguyên lưu trữ gói tính năng kế thừa bất biến. Những đường dẫn lưu trữ v2 đó không phải là phiên bản gói ứng dụng. OCR chính xác sử dụng định dạng thời gian chạy v3 và ghi lại nguồn gốc phát hành ứng dụng của nó một cách riêng biệt.
+
+`tests/unit/infra/release-version-policy.test.ts` thực thi các ranh giới này. Miền phiên bản mới hoặc quá trình di chuyển phải cập nhật hợp đồng đó và thiết kế di chuyển thành phần lạ có liên quan cùng nhau.
+Các giá trị API và gói kế thừa độc lập tồn tại trong `config/release-version-policy.json`; Đồng bộ hóa phiên bản ứng dụng không bao giờ được viết lại tệp chính sách đó một cách ngầm định.
 
 ## Biến môi trường {#environment-variables}
 

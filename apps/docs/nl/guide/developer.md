@@ -1,8 +1,9 @@
 ---
 description: "Lokale ontwikkelomgeving opzetten, commando's, codeconventies en hoe je een nieuwe tool aan SnapOtter toevoegt."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 057d7364f4cc
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: f8e939b4ce8e
+i18n_hash_version: 2
 ---
 
 # Ontwikkelaarsgids {#developer-guide}
@@ -11,12 +12,12 @@ Hoe je een lokale ontwikkelomgeving opzet en code bijdraagt aan SnapOtter.
 
 ## Vereisten {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (vereist voor lokale Postgres + Redis, containerbuilds en AI-functies)
 - Git
 
-Python 3.10+ is alleen nodig als je aan de AI/ML-sidecar werkt (achtergrond verwijderen, opschalen, OCR).
+Python 3.11+ is alleen nodig als je aan de AI/ML-sidecar werkt (achtergrond verwijderen, opschalen, OCR).
 
 ## Installatie {#setup}
 
@@ -32,10 +33,10 @@ Dit start twee dev-servers:
 
 | Service  | URL                      | Opmerkingen                        |
 |----------|--------------------------|------------------------------------|
-| Frontend | http://localhost:1349     | Vite-dev-server, proxyt /api       |
+| Frontend | http://localhost:1351     | Vite-dev-server, proxyt /api       |
 | Backend  | http://localhost:13490    | Fastify-API (bereikbaar via proxy) |
 
-Open http://localhost:1349 in je browser. Meld je aan met `admin` / `admin`. Je wordt gevraagd het wachtwoord te wijzigen bij de eerste aanmelding.
+Open http://localhost:1351 in je browser. Meld je aan met `admin` / `admin`. Je wordt gevraagd het wachtwoord te wijzigen bij de eerste aanmelding.
 
 ## Projectstructuur {#project-structure}
 
@@ -219,6 +220,17 @@ Gebruik BuildKit-cachemounts voor snellere rebuilds:
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## Versiedomeinen vrijgeven {#release-version-domains}
+
+SnapOtter heeft opzettelijk drie versiedomeinen. Kopieer tijdens een release niet het ene domein naar het andere:
+
+- De releaseversie van de applicatie omvat het rootmanifest, alle privéwerkruimtepakketten en `APP_VERSION`. Semantic-release levert deze waarde, en `pnpm version:sync <version>` werkt elke werkruimte bij voordat een applicatie wordt uitgebracht.
+- OpenAPI `info.version` is het stabiele publieke API-groot contract. Alle gelokaliseerde specificaties blijven op `<major>.0.0` voor compatibele applicatiereleases en veranderen alleen wanneer het API-contract overgaat naar een nieuwe hoofdversie.
+- `docker/feature-manifest.json` behoudt `imageVersion: 2.0.0` als het onveranderlijke historische opslagtijdperk met featurebundels. Deze v2-archiefpaden zijn geen applicatiepakketversies. Nauwkeurige OCR maakt gebruik van runtime-indeling v3 en registreert de herkomst van de applicatierelease afzonderlijk.
+
+`tests/unit/infra/release-version-policy.test.ts` handhaaft deze grenzen. Een nieuw versiedomein of een nieuwe migratie moet dat contract en het relevante artefactmigratieontwerp samen bijwerken.
+De onafhankelijke API- en legacy-bundelwaarden bevinden zich in `config/release-version-policy.json`; Synchronisatie van de applicatieversie mag dat beleidsbestand nooit impliciet herschrijven.
 
 ## Omgevingsvariabelen {#environment-variables}
 

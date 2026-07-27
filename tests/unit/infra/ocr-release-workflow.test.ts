@@ -4,18 +4,59 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
 const root = process.cwd();
 const bundlesWorkflowPath = path.resolve(root, ".github/workflows/ai-bundles.yml");
+const ciWorkflowPath = path.resolve(root, ".github/workflows/ci.yml");
 const releaseWorkflowPath = path.resolve(root, ".github/workflows/release.yml");
 const verifierPath = path.resolve(root, "docker/verify-ocr-runtime.sh");
 const hfReleaseRequirementsPath = path.resolve(root, "docker/hf-release-requirements.txt");
 const ocrReleaseRunbookPath = path.resolve(root, ".github/OCR_RUNTIME_RELEASE_RUNBOOK.md");
+const ocrRequirementsPaths = [
+  path.resolve(root, "docker/ocr-runtime-requirements-amd64.txt"),
+  path.resolve(root, "docker/ocr-runtime-requirements-arm64.txt"),
+];
 
 function readRequired(file: string): string {
   expect(existsSync(file), `${path.relative(root, file)} is missing`).toBe(true);
   return readFileSync(file, "utf8");
+}
+
+interface WorkflowDocument {
+  on: Record<string, unknown>;
+  jobs: Record<string, { if?: string; needs?: string | string[] }>;
+}
+
+/**
+ * Name of the job that gates Hugging Face publication behind a release commit,
+ * or null when publication is reachable without one.
+ *
+ * `publish` uploads feature bundles, so it must only ever run as part of a
+ * release. GitHub skips a job whose `needs` were skipped, so walking the
+ * dependency graph and finding a `release_commit` condition proves the manual
+ * and scheduled triggers cannot reach it.
+ */
+function publishGate(workflow: WorkflowDocument): string | null {
+  const seen = new Set<string>();
+  const queue = ["publish"];
+
+  while (queue.length > 0) {
+    const name = queue.shift() as string;
+    if (seen.has(name)) continue;
+    seen.add(name);
+
+    const definition = workflow.jobs[name];
+    expect(definition, `job ${name} is missing`).toBeTruthy();
+    if (definition.if?.includes("inputs.release_commit")) return name;
+
+    const needs = definition.needs;
+    if (typeof needs === "string") queue.push(needs);
+    else if (Array.isArray(needs)) queue.push(...needs);
+  }
+
+  return null;
 }
 
 function job(workflow: string, name: string, nextName?: string): string {
@@ -44,6 +85,28 @@ function measuredEstimateContract(workflow: string): string {
 }
 
 describe("OCR v3 bundle release workflow", () => {
+  it("uses audited non-vulnerable HTTP dependency locks on both architectures", () => {
+    for (const requirementsPath of ocrRequirementsPaths) {
+      const requirements = readRequired(requirementsPath);
+      expect(requirements).toMatch(/^requests==2\.33\.0 --hash=sha256:[a-f0-9]{64}$/m);
+      expect(requirements).toMatch(/^idna==3\.15 --hash=sha256:[a-f0-9]{64}$/m);
+      expect(requirements).not.toMatch(/^requests==2\.32\.3\b/m);
+      expect(requirements).not.toMatch(/^idna==3\.10\b/m);
+    }
+
+    const ci = readRequired(ciWorkflowPath);
+    const bundles = readRequired(bundlesWorkflowPath);
+    for (const workflow of [ci, bundles]) {
+      expect(workflow).toContain('pip install "pip-audit==2.10.0"');
+      expect(workflow).toContain("docker/ocr-runtime-requirements-amd64.txt");
+      expect(workflow).toContain("docker/ocr-runtime-requirements-arm64.txt");
+      expect(workflow).toContain("--no-deps --disable-pip --aliases");
+    }
+    expect(job(bundles, "build-ocr", "verify-ocr")).toContain(
+      "Audit exact OCR runtime dependency lock",
+    );
+  });
+
   it("scans and inventories both architecture-specific release images", () => {
     const workflow = readRequired(releaseWorkflowPath);
     const scanJob = job(workflow, "scan", "sbom");
@@ -62,7 +125,6 @@ describe("OCR v3 bundle release workflow", () => {
   it("builds and verifies both portable targets on native runners", () => {
     const workflow = readRequired(bundlesWorkflowPath);
 
-    expect(workflow).not.toContain("workflow_dispatch:");
     expect(workflow).not.toContain("default: false");
     expect(job(workflow, "validate-inputs", "build-ocr")).toContain(
       `[[ "\${VERSION}" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+`,
@@ -93,6 +155,23 @@ describe("OCR v3 bundle release workflow", () => {
     expect(workflow).not.toContain("  verify-legacy:\n");
     expect(workflow).not.toMatch(/bundle: ocr\s+arch: (amd64-gpu|arm64-cpu)/);
     expect(workflow).not.toMatch(/paddleocr|onnxruntime-gpu/i);
+  });
+
+  it("keeps bundle publication reachable only from the release workflow", () => {
+    const workflow = load(readRequired(bundlesWorkflowPath)) as WorkflowDocument;
+
+    // The manual and scheduled triggers exist so the standalone
+    // installed-AI verification lane can run outside a release. They must not
+    // open a second route to the Hugging Face publish job.
+    expect(Object.keys(workflow.on)).toContain("workflow_dispatch");
+    expect(Object.keys(workflow.on)).toContain("schedule");
+    expect(publishGate(workflow)).toBe("validate-inputs");
+
+    // Negative control: strip the release-commit gate and the same walk must
+    // report the publish job as reachable from a manual dispatch.
+    const ungated = load(readRequired(bundlesWorkflowPath)) as WorkflowDocument;
+    delete ungated.jobs["validate-inputs"].if;
+    expect(publishGate(ungated)).toBeNull();
   });
 
   it("blocks release on the amd64 CPU pack running with a real NVIDIA GPU exposed", () => {
@@ -723,7 +802,9 @@ describe("OCR v3 bundle release workflow", () => {
     expect(aiBundles).toContain(
       "OCR_RUNTIME_INDEX_SIGNING_KEY_B64: ${{ secrets.OCR_RUNTIME_INDEX_SIGNING_KEY_B64 }}",
     );
-    expect(manifest).toContain("needs: [release, docker, scan, sbom, ai-bundles]");
+    expect(manifest).toContain(
+      "needs: [release, prebuilt, archive-security, docker, scan, sbom, ai-bundles]",
+    );
     expect(docker).toContain("Reuse an existing published platform digest");
     expect(docker).toContain("snapotter-v${VERSION}-${PLATFORM_PAIR}.digest");
     expect(docker).toContain('reuse_description="immutable ${asset_name} checkpoint"');
@@ -773,7 +854,7 @@ describe("OCR v3 bundle release workflow", () => {
 
   it("makes every run-scoped artifact upload safe to replace on a rerun", () => {
     const workflows = [readRequired(bundlesWorkflowPath), readRequired(releaseWorkflowPath)];
-    const expectedUploadCounts = [5, 1];
+    const expectedUploadCounts = [5, 2];
 
     workflows.forEach((workflow, workflowIndex) => {
       const uploadSteps = [
@@ -812,7 +893,7 @@ describe("OCR v3 bundle release workflow", () => {
     expect(releaseJob).toContain("release_commit: ${{ steps.check.outputs.release_commit }}");
     expect(releaseJob).toContain('git rev-parse "refs/tags/v${version}^{commit}"');
     expect(release.match(/ref: \$\{\{ needs\.release\.outputs\.release_commit \}\}/g)).toHaveLength(
-      5,
+      8,
     );
     expect(bundles).toContain("release_commit:");
     expect(bundles).toContain("required: true");
@@ -846,9 +927,13 @@ describe("OCR v3 bundle release workflow", () => {
   it("snapshots Hugging Face reads and publishes with a compare-and-swap parent", () => {
     const publishJob = job(readRequired(bundlesWorkflowPath), "publish");
 
+    // A shared group plus cancel-in-progress: false is the whole serialization
+    // contract. GitHub queues the second run behind the first, which is what
+    // keeps two releases off the one shared branch head. There is no `queue`
+    // concurrency key in Actions, so asserting one would only look reassuring.
     expect(publishJob).toContain("group: snapotter-hf-feature-bundles-publish");
     expect(publishJob).toContain("cancel-in-progress: false");
-    expect(publishJob).toContain("queue: max");
+    expect(publishJob).not.toMatch(/^\s*queue:/m);
     expect(publishJob).toContain("snapshot_revision = api.repo_info(");
     expect(publishJob).toContain('repo_id, repo_type="model", revision="main", token=token');
     expect(publishJob).toContain("revision=snapshot_revision");
@@ -1289,9 +1374,9 @@ describe("OCR v3 bundle release workflow", () => {
   it("serializes mutation boundaries without locking the approval-gated manifest", () => {
     const release = readRequired(releaseWorkflowPath);
     const releaseJob = job(release, "release", "prebuilt");
-    const prebuiltJob = job(release, "prebuilt", "docker");
+    const prebuiltJob = job(release, "prebuilt", "archive-security");
     const dockerJob = job(release, "docker", "scan");
-    const manifestJob = job(release, "manifest", "aliases");
+    const manifestJob = job(release, "manifest", "image-provenance");
     const aliasesJob = job(release, "aliases");
 
     expect(releaseJob).toContain("group: snapotter-semantic-release");
@@ -1307,17 +1392,19 @@ describe("OCR v3 bundle release workflow", () => {
     expect(manifestJob).not.toContain("concurrency:");
     expect(aliasesJob).toContain("group: snapotter-image-moving-aliases");
     expect(aliasesJob).toContain("cancel-in-progress: false");
-    expect(aliasesJob).toContain("queue: max");
+    expect(aliasesJob).not.toContain("queue:");
     expect(aliasesJob).not.toContain("environment:");
   });
 
   it("requires application SBOM completion before publishing public image tags", () => {
-    const manifest = job(readRequired(releaseWorkflowPath), "manifest", "aliases");
-    expect(manifest).toContain("needs: [release, docker, scan, sbom, ai-bundles]");
+    const manifest = job(readRequired(releaseWorkflowPath), "manifest", "image-provenance");
+    expect(manifest).toContain(
+      "needs: [release, prebuilt, archive-security, docker, scan, sbom, ai-bundles]",
+    );
   });
 
   it("revalidates the remote release tag after approval and at both immutable publications", () => {
-    const manifest = job(readRequired(releaseWorkflowPath), "manifest", "aliases");
+    const manifest = job(readRequired(releaseWorkflowPath), "manifest", "image-provenance");
 
     expect(manifest).toContain("ref: ${{ needs.release.outputs.release_commit }}");
     expect(manifest).toContain("persist-credentials: false");
@@ -1343,14 +1430,14 @@ describe("OCR v3 bundle release workflow", () => {
 
   it("publishes immutable version tags separately and never regresses moving aliases", () => {
     const release = readRequired(releaseWorkflowPath);
-    const manifest = job(release, "manifest", "aliases");
+    const manifest = job(release, "manifest", "image-provenance");
     const aliases = job(release, "aliases");
 
     expect(manifest).toContain('arguments=("-t" "snapotter/snapotter:${VERSION}")');
     expect(manifest).toContain('arguments=("-t" "ghcr.io/snapotter-hq/snapotter:${VERSION}")');
     expect(manifest).not.toContain("{{major}}");
     expect(manifest).not.toContain("value=latest");
-    expect(aliases).toContain("needs: [release, manifest]");
+    expect(aliases).toContain("needs: [release, manifest, image-provenance, release-subjects]");
     expect(aliases).toContain(
       "Fetch and evaluate stable tags immediately before Docker Hub aliases",
     );
@@ -1418,7 +1505,9 @@ describe("OCR v3 bundle release workflow", () => {
   });
 
   it("builds deterministic immutable prebuilt archive and checksum assets", () => {
-    const prebuilt = job(readRequired(releaseWorkflowPath), "prebuilt", "docker");
+    const release = readRequired(releaseWorkflowPath);
+    const prebuilt = job(release, "prebuilt", "archive-security");
+    const archiveSecurity = job(release, "archive-security", "docker");
 
     expect(prebuilt).toContain(
       'SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${RELEASE_COMMIT}")"',
@@ -1433,10 +1522,12 @@ describe("OCR v3 bundle release workflow", () => {
     expect(prebuilt).toContain("--pax-option=delete=atime,delete=ctime");
     expect(prebuilt).toContain("gzip -n");
     expect(prebuilt).not.toContain("--clobber");
-    expect(prebuilt).toContain("verify_or_upload_asset");
-    expect(prebuilt).toContain("Existing immutable release asset differs");
-    expect(prebuilt).toContain("Expected exactly one immutable release asset after upload");
-    expect(prebuilt).toContain('verify_or_upload_asset "/tmp/${archive_name}"');
-    expect(prebuilt).toContain('verify_or_upload_asset "/tmp/${archive_name}.sha256"');
+    expect(prebuilt).toContain("name: prebuilt-${{ matrix.arch }}");
+    expect(prebuilt).not.toContain("gh release upload");
+    expect(archiveSecurity).toContain("verify_or_upload_asset");
+    expect(archiveSecurity).toContain("Existing immutable release asset differs");
+    expect(archiveSecurity).toContain("Expected exactly one immutable release asset after upload");
+    expect(archiveSecurity).toContain('"/tmp/prebuilt/${archive_name}"');
+    expect(archiveSecurity).toContain('"/tmp/prebuilt/${archive_name}.sha256"');
   });
 });

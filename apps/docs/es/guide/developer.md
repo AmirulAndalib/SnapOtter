@@ -1,8 +1,9 @@
 ---
 description: "Configuración del entorno de desarrollo local, comandos, convenciones de código y cómo añadir una nueva herramienta a SnapOtter."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 572206416dc1
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: 334c91e72b73
+i18n_hash_version: 2
 ---
 
 # Guía del desarrollador {#developer-guide}
@@ -11,12 +12,12 @@ Cómo configurar un entorno de desarrollo local y contribuir con código a SnapO
 
 ## Requisitos previos {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (requerido para Postgres + Redis locales, construcciones de contenedores y funciones de IA)
 - Git
 
-Python 3.10+ solo es necesario si trabajas en el sidecar de IA/ML (eliminación de fondo, escalado, OCR).
+Python 3.11+ solo es necesario si trabajas en el sidecar de IA/ML (eliminación de fondo, escalado, OCR).
 
 ## Configuración {#setup}
 
@@ -32,10 +33,10 @@ Esto inicia dos servidores de desarrollo:
 
 | Servicio  | URL                      | Notas                              |
 |----------|--------------------------|------------------------------------|
-| Frontend | http://localhost:1349     | Servidor de desarrollo Vite, hace proxy de /api      |
+| Frontend | http://localhost:1351     | Servidor de desarrollo Vite, hace proxy de /api      |
 | Backend  | http://localhost:13490    | API de Fastify (accedida vía proxy)   |
 
-Abre http://localhost:1349 en tu navegador. Inicia sesión con `admin` / `admin`. Se te pedirá que cambies la contraseña en el primer inicio de sesión.
+Abre http://localhost:1351 en tu navegador. Inicia sesión con `admin` / `admin`. Se te pedirá que cambies la contraseña en el primer inicio de sesión.
 
 ## Estructura del proyecto {#project-structure}
 
@@ -219,6 +220,17 @@ Usa las cache mounts de BuildKit para reconstrucciones más rápidas:
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## Dominios de versión de lanzamiento {#release-version-domains}
+
+SnapOtter tiene intencionalmente tres dominios de versión. No copie un dominio en otro durante un lanzamiento:
+
+- La versión de lanzamiento de la aplicación cubre el manifiesto raíz, todos los paquetes de espacios de trabajo privados y `APP_VERSION`. Semantic-release proporciona este valor y `pnpm version:sync <version>` actualiza cada espacio de trabajo antes del lanzamiento de una aplicación.
+- OpenAPI `info.version` es el contrato principal público estable API. Todas las especificaciones localizadas permanecen en `<major>.0.0` para versiones de aplicaciones compatibles y cambian solo cuando el contrato API pasa a una nueva versión principal.
+- `docker/feature-manifest.json` mantiene a `imageVersion: 2.0.0` como la época de almacenamiento de paquetes de funciones heredadas e inmutables. Esas rutas de archivo v2 no son versiones de paquetes de aplicaciones. Accurate OCR utiliza el formato de tiempo de ejecución v3 y registra el origen de la versión de la aplicación por separado.
+
+`tests/unit/infra/release-version-policy.test.ts` impone estos límites. Una nueva versión de dominio o migración debe actualizar ese contrato y el diseño de migración de artefacto relevante juntos.
+Los valores independientes API y del paquete heredado se encuentran en `config/release-version-policy.json`; La sincronización de la versión de la aplicación nunca debe reescribir ese archivo de política implícitamente.
 
 ## Variables de entorno {#environment-variables}
 

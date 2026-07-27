@@ -1,8 +1,9 @@
 ---
 description: "แท็กของ Docker image สำหรับ SnapOtter, การเปรียบเทียบประสิทธิภาพ GPU, การล็อกเวอร์ชัน และการรองรับหลายแพลตฟอร์มสำหรับ AMD64 และ ARM64"
-i18n_output_hash: 6df1f68453ec
-i18n_source_hash: fda322e78b4b
+i18n_source_hash: 566e20ca07fc
 i18n_provenance: human
+i18n_output_hash: 119de6d8c1c4
+i18n_hash_version: 2
 ---
 
 # Docker Image {#docker-image}
@@ -93,13 +94,13 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # เปลี่ยนสิ่งนี้สำหรับการปรับใช้ที่ไม่ใช่ภายในเครื่อง
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -140,9 +141,9 @@ volumes:
 | แท็ก | คำอธิบาย |
 |-----|------------|
 | `latest` | รุ่นล่าสุด |
-| `1.11.0` | เวอร์ชันที่ระบุแน่นอน |
-| `1.11` | patch ล่าสุดใน 1.11.x |
-| `1` | minor ล่าสุดใน 1.x |
+| `2.1.0` | เวอร์ชันที่ระบุแน่นอน |
+| `2.1` | patch ล่าสุดใน 2.1.x |
+| `2` | minor ล่าสุดใน 2.x |
 
 ## แพลตฟอร์ม {#platforms}
 

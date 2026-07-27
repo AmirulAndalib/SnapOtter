@@ -50,7 +50,7 @@ If you are contributing on behalf of your employer and your employer retains IP 
 
 ### Prerequisites {#prerequisites}
 
-- Node.js 22+
+- Node.js 22.22+
 - pnpm 9+
 - Python 3.11+ (only for AI tools)
 - Docker (optional, for full integration testing)
@@ -68,7 +68,7 @@ docker compose -f docker-compose.dev.yml up -d
 # Install dependencies
 pnpm install
 
-# Start dev servers (web on :1349, API on :13490)
+# Start dev servers (web on :1351, API on :13490)
 pnpm dev
 ```
 

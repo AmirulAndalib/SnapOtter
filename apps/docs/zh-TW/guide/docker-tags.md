@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter Docker 映像標籤、GPU 效能基準、版本鎖定，以及 AMD64 與 ARM64 的多平台支援。"
-i18n_output_hash: 8b69b4ed0e1b
-i18n_source_hash: fda322e78b4b
+i18n_source_hash: 566e20ca07fc
 i18n_provenance: human
+i18n_output_hash: 1e0a57772b89
+i18n_hash_version: 2
 ---
 
 # Docker 映像 {#docker-image}
@@ -93,13 +94,13 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # 針對非本地部署更改此設置
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -140,9 +141,9 @@ volumes:
 | 標籤 | 說明 |
 |-----|------------|
 | `latest` | 最新版本 |
-| `1.11.0` | 明確版本 |
-| `1.11` | 1.11.x 中的最新修補版 |
-| `1` | 1.x 中的最新次要版 |
+| `2.1.0` | 明確版本 |
+| `2.1` | 2.1.x 中的最新修補版 |
+| `2` | 2.x 中的最新次要版 |
 
 ## 平台 {#platforms}
 

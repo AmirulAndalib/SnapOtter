@@ -1,8 +1,9 @@
 ---
 description: "Wie man zu SnapOtter beiträgt. Fehlerberichte, Feature-Anfragen, Pull Requests und CLA-Anforderungen."
-i18n_source_hash: 528802503035
+i18n_source_hash: 6c920a5f83e0
 i18n_provenance: human
-i18n_output_hash: dad4aeee07c4
+i18n_output_hash: ed043841f564
+i18n_hash_version: 2
 ---
 
 # Mitwirken {#contributing}
@@ -53,7 +54,7 @@ Wenn du im Auftrag deines Arbeitgebers beiträgst und dein Arbeitgeber die IP-Re
 
 ### Voraussetzungen {#prerequisites}
 
-- Node.js 22+
+- Node.js 22.22+
 - pnpm 9+
 - Python 3.11+ (nur für AI-Tools)
 - Docker (optional, für vollständige Integrationstests)
@@ -71,7 +72,7 @@ docker compose -f docker-compose.dev.yml up -d
 # Install dependencies
 pnpm install
 
-# Start dev servers (web on :1349, API on :13490)
+# Start dev servers (web on :1351, API on :13490)
 pnpm dev
 ```
 

@@ -1,4 +1,5 @@
 import { test as base, expect } from "@playwright/test";
+import { authFile } from "../../playwright.config";
 import { login, openSettings, test } from "./helpers";
 
 const API = process.env.API_URL || "http://localhost:13490";
@@ -19,7 +20,16 @@ async function getAdminToken(): Promise<string> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username: "admin", password: "admin" }),
   });
-  const data = await res.json();
+  // Fail here, not three calls later. Without this an admin login that was
+  // refused returns undefined and every later request sends "Bearer undefined",
+  // which surfaces as a 401 on whatever the test happened to do next.
+  if (!res.ok) {
+    throw new Error(
+      `Admin login failed with ${res.status}; the admin password may not have been restored by an earlier spec`,
+    );
+  }
+  const data = (await res.json()) as { token?: string };
+  if (!data.token) throw new Error("Admin login returned no token");
   return data.token;
 }
 
@@ -1381,7 +1391,9 @@ base.describe("RBAC API - User expanded endpoint checks", () => {
 // ===========================================================================
 
 base.describe("RBAC GUI - Admin admin-only tab deep access", () => {
-  base.use({ storageState: ".playwright/.auth/user.json" });
+  // The run-scoped auth file, not the pre-isolation .playwright path. A stale
+  // path leaves the block signed out, so every case here drove the login page.
+  base.use({ storageState: authFile });
 
   base.test("admin can open Roles tab and see Create Custom Role button", async ({ page }) => {
     await page.goto("/");

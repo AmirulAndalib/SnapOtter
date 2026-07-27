@@ -1,8 +1,9 @@
 ---
 description: "Wdroż SnapOtter na produkcję za pomocą Dockera. Wymagania sprzętowe, konfiguracja GPU i konfiguracje reverse proxy dla Nginx, Traefik i Cloudflare."
-i18n_output_hash: 20b2807dca9c
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: e3ddacd91df0
+i18n_hash_version: 2
 ---
 
 # Wdrożenie {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Zmień to w przypadku wdrożeń nielokalnych
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
+### Sprawdź przyspieszenie GPU {#verify-gpu-acceleration}
+
 Sprawdź wykrywanie CUDA w logach:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+Jeśli narzędzia AI działają na procesorze, mimo że `--gpus all` i NVIDIA Container Toolkit są poprawnie skonfigurowane, zainstaluj ponownie pakiet, którego dotyczy problem (na przykład usuwanie tła) z **Ustawienia → Funkcje AI**. Instalator przywraca kompilację GPU ONNX Runtime, która w przeciwnym razie kompilacja oparta wyłącznie na procesorze pobrana przez inny pakiet (np. transkrypcja) może być cieniem we współdzielonym środowisku AI. Jeśli ponowna instalacja z interfejsu użytkownika nie przywróci GPU na starszym obrazie, zobacz ręczną naprawę w [problem #490](https://github.com/snapotter-hq/SnapOtter/issues/490).
 
 ## Wymagania sprzętowe {#hardware-requirements}
 
@@ -436,11 +441,11 @@ Błąd przy uruchamianiu nazywa dokładny UID do użycia, więc najszybszą drog
 | `AUTH_ENABLED` | `true` | Włącz/wyłącz wymóg logowania |
 | `DEFAULT_USERNAME` | `admin` | Początkowa nazwa użytkownika administratora |
 | `DEFAULT_PASSWORD` | `admin` | Początkowe hasło administratora (wymuszona zmiana przy pierwszym logowaniu) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Limit przesyłania na plik |
-| `MAX_BATCH_SIZE` | `100` | Maksymalna liczba plików na żądanie wsadowe |
+| `MAX_UPLOAD_SIZE_MB` | `0` (bez limitu) | Limit przesyłania na plik w MB. Obraz dostarczany jest z wartością `0`; kompilacja ze źródeł zaczyna od 100 |
+| `MAX_BATCH_SIZE` | `0` (bez limitu) | Maksymalna liczba plików na żądanie wsadowe. Obraz dostarczany jest z wartością `0`; kompilacja ze źródeł zaczyna od 100 |
 | `RATE_LIMIT_PER_MIN` | `1000` | Żądania API na minutę na IP (ustaw 0, aby wyłączyć) |
 | `MAX_USERS` | `0` (bez limitu) | Maksymalna liczba kont użytkowników |
-| `TRUST_PROXY` | `true` | Ufaj nagłówkom X-Forwarded-For z reverse proxy |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Które węzły mogą ustawiać IP klienta przez nagłówek `X-Forwarded-For`. Domyślnie tylko sieci prywatne |
 | `PUID` | `999` | Uruchom jako ten UID (dla uprawnień montowań bind) |
 | `PGID` | `999` | Uruchom jako ten GID (dla uprawnień montowań bind) |
 | `LOG_LEVEL` | `info` | Szczegółowość logów: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Reverse Proxy {#reverse-proxy}
 
-SnapOtter domyślnie ustawia `TRUST_PROXY=true`, aby ograniczanie szybkości i logowanie używały rzeczywistego adresu IP klienta z nagłówków `X-Forwarded-For`.
+`TRUST_PROXY` ma domyślnie wartość `loopback,linklocal,uniquelocal`, więc SnapOtter wierzy nagłówkowi `X-Forwarded-For` tylko wtedy, gdy przychodzi on od węzła z sieci prywatnej. Zwrotne proxy na tym samym hoście, w sieci Dockera albo w twojej sieci LAN jest zaufane od razu, dzięki czemu ograniczanie szybkości, blokada logowania metodą siłową, dziennik audytu i lista dozwolonych adresów IP w edycji enterprise widzą prawdziwy adres IP klienta bez żadnej konfiguracji.
+
+Ustaw `TRUST_PROXY=true` tylko wtedy, gdy stojące z przodu proxy dociera do SnapOttera z **publicznego** adresu, na przykład chmurowy load balancer w innej sieci. Na instancji wystawionej bezpośrednio ta wartość oddaje `request.ip` w ręce atakującego, ponieważ ktoś, kto podmienia nagłówek przy każdym żądaniu, dostaje świeży licznik limitu.
+
+Dwie rzeczy warto wiedzieć, zanim zaczniesz mierzyć adresy IP klientów. Docker Desktop na macOS i Windows obsługuje opublikowany port przez proxy w przestrzeni użytkownika, które przepisuje każdy adres źródłowy na bramę maszyny wirtualnej `192.168.65.1`, więc żadna wartość `TRUST_PROXY` nie odzyska tam prawdziwego klienta; wszystko, co ma być widoczne w internecie, wdrażaj na Linuksie. Na każdej platformie połączenie z opublikowanym portem przez `localhost` jest widziane jako brama mostka, a nie jako twój klient, więc test na localhoście nic nie mówi o tym, jak przypisywany jest prawdziwy klient. Pełna tabela wartości `TRUST_PROXY` oraz zastrzeżenie dotyczące Docker Desktop znajdują się w [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy).
+
+Dla każdego serwera proxy poniżej ważne są dwie rzeczy: zezwalaj na duże treści żądań (przesyłanie) i nie buforuj odpowiedzi. Serwer proxy buforujący odpowiedzi przerywa postęp SSE i, co bardziej widoczne, powoduje, że pobieranie dużego pliku „rozpoczyna się, ale nigdy nie kończy”, ponieważ serwer proxy przechowuje cały plik przed przekazaniem go dalej. SnapOtter wysyła `X-Accel-Buffering: no` podczas pobierania, więc nginx przesyła je strumieniowo, nawet jeśli buforowanie jest włączone gdzie indziej, ale serwery proxy inne niż nginx wymagają jawnego wyłączenia buforowania odpowiedzi (pokazane w każdej konfiguracji poniżej). Jeśli pobieranie zostanie wstrzymane, pierwszą rzeczą do sprawdzenia jest buforujący serwer proxy z przodu.
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # Przesyłaj strumieniowo odpowiedzi zamiast buforowania: potrzebne do postępu SSE (wsadowe, AI, instalacje funkcji) i do pobierania dużych plików.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` wyłącza buforowanie odpowiedzi, które jest wymagane dla zdarzeń postępu SSE (przetwarzanie wsadowe, narzędzia AI, instalacje funkcji). Wydłużone limity czasu pozwalają dużym przesłaniom plików ukończyć się bez wcześniejszego zamknięcia połączenia przez Caddy.
+`flush_interval -1` wyłącza buforowanie odpowiedzi, które jest wymagane w przypadku zdarzeń postępu SSE (przetwarzanie wsadowe, narzędzia AI, instalacje funkcji) oraz w przypadku pobierania dużych plików w celu przesyłania strumieniowego zamiast zatrzymywania. Wydłużone limity czasu pozwalają na zakończenie przesyłania dużych plików bez wcześniejszego zamykania połączenia przez Caddy.
 
 ### Tunele Cloudflare {#cloudflare-tunnels}
 

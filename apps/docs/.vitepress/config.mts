@@ -4,6 +4,7 @@ import { pagefindPlugin } from "vitepress-plugin-pagefind";
 import pkg from "../../../package.json";
 import { SUPPORTED_LOCALES } from "../../../packages/shared/src/i18n/index.ts";
 import { t } from "./i18n/ui.mjs";
+import { pageOnlySidebar } from "./llms-sidebar.mjs";
 
 const NON_EN = SUPPORTED_LOCALES.filter((l) => l.code !== "en");
 const HOSTNAME = "https://docs.snapotter.com";
@@ -127,6 +128,14 @@ export default defineConfig({
 
   sitemap: { hostname: "https://docs.snapotter.com" },
 
+  // VitePress defaults to shiki's `github-light`, whose comment (#6a737d, 4.45:1)
+  // and string (#22863a, 4.28:1) tokens both miss AA against the code-block
+  // background. The high-contrast variant is built for exactly this and is bundled
+  // with shiki already. Dark mode was never the failing side.
+  markdown: {
+    theme: { light: "github-light-high-contrast", dark: "github-dark" },
+  },
+
   head: [
     ["meta", { name: "theme-color", content: "#E07832" }],
     [
@@ -224,6 +233,7 @@ export default defineConfig({
       }),
       llmstxt({
         domain: "https://docs.snapotter.com",
+        sidebar: pageOnlySidebar,
         customLLMsTxtTemplate: `# {title}
 
 {description}
@@ -342,19 +352,19 @@ function buildBaseTheme() {
               {
                 text: "Essentials",
                 items: [
-                  { text: "Resize", link: "/tools/image/resize" },
-                  { text: "Crop", link: "/tools/image/crop" },
-                  { text: "Rotate & Flip", link: "/tools/image/rotate" },
-                  { text: "Convert", link: "/tools/image/convert" },
-                  { text: "Compress", link: "/tools/image/compress" },
+                  { text: "Resize Image", link: "/tools/image/resize" },
+                  { text: "Crop Image", link: "/tools/image/crop" },
+                  { text: "Rotate & Flip Image", link: "/tools/image/rotate" },
+                  { text: "Convert Image", link: "/tools/image/convert" },
+                  { text: "Compress Image", link: "/tools/image/compress" },
                 ],
               },
               {
                 text: "Optimization",
                 items: [
                   { text: "Optimize for Web", link: "/tools/image/optimize-for-web" },
-                  { text: "Remove Metadata", link: "/tools/image/strip-metadata" },
-                  { text: "Edit Metadata", link: "/tools/image/edit-metadata" },
+                  { text: "Remove Image Metadata", link: "/tools/image/strip-metadata" },
+                  { text: "Edit Image Metadata", link: "/tools/image/edit-metadata" },
                   { text: "Bulk Rename", link: "/tools/image/bulk-rename" },
                   { text: "Image to PDF", link: "/tools/image/image-to-pdf" },
                   { text: "Favicon Generator", link: "/tools/image/favicon" },
@@ -364,7 +374,7 @@ function buildBaseTheme() {
                 text: "Adjustments",
                 items: [
                   { text: "Adjust Colors", link: "/tools/image/adjust-colors" },
-                  { text: "Sharpening", link: "/tools/image/sharpening" },
+                  { text: "Sharpen Image", link: "/tools/image/sharpening" },
                   { text: "Replace & Invert Color", link: "/tools/image/replace-color" },
                   { text: "Color Blindness Simulation", link: "/tools/image/color-blindness" },
                   { text: "Duotone", link: "/tools/image/duotone" },
@@ -401,9 +411,9 @@ function buildBaseTheme() {
               {
                 text: "Layout",
                 items: [
-                  { text: "Collage / Grid", link: "/tools/image/collage" },
-                  { text: "Stitch / Combine", link: "/tools/image/stitch" },
-                  { text: "Image Splitting", link: "/tools/image/split" },
+                  { text: "Collage & Grid", link: "/tools/image/collage" },
+                  { text: "Stitch Images", link: "/tools/image/stitch" },
+                  { text: "Split Image", link: "/tools/image/split" },
                   { text: "Border & Frame", link: "/tools/image/border" },
                   { text: "Beautify Screenshot", link: "/tools/image/beautify" },
                   { text: "Circle Crop", link: "/tools/image/circle-crop" },
@@ -426,8 +436,8 @@ function buildBaseTheme() {
                   { text: "Remove Background", link: "/tools/image/remove-background" },
                   { text: "Image Upscaling", link: "/tools/image/upscale" },
                   { text: "Object Eraser", link: "/tools/image/erase-object" },
-                  { text: "OCR / Text Extraction", link: "/tools/image/ocr" },
-                  { text: "Face / PII Blur", link: "/tools/image/blur-faces" },
+                  { text: "Extract Text from Image (OCR)", link: "/tools/image/ocr" },
+                  { text: "Blur Faces & PII", link: "/tools/image/blur-faces" },
                   { text: "Smart Crop", link: "/tools/image/smart-crop" },
                   { text: "Image Enhancement", link: "/tools/image/image-enhancement" },
                   { text: "Face Enhancement", link: "/tools/image/enhance-faces" },
@@ -460,7 +470,7 @@ function buildBaseTheme() {
               { text: "Video Color", link: "/tools/video/video-color" },
               { text: "Video Speed", link: "/tools/video/video-speed" },
               { text: "Reverse Video", link: "/tools/video/reverse-video" },
-              { text: "Normalize Audio", link: "/tools/video/video-loudnorm" },
+              { text: "Normalize Video Audio", link: "/tools/video/video-loudnorm" },
               { text: "Aspect Pad", link: "/tools/video/aspect-pad" },
               { text: "Blur Pad", link: "/tools/video/blur-pad" },
               { text: "Watermark Video", link: "/tools/video/watermark-video" },
@@ -484,7 +494,7 @@ function buildBaseTheme() {
             items: [
               { text: "Convert Audio", link: "/tools/audio/convert-audio" },
               { text: "Trim Audio", link: "/tools/audio/trim-audio" },
-              { text: "Volume Adjust", link: "/tools/audio/volume-adjust" },
+              { text: "Adjust Volume", link: "/tools/audio/volume-adjust" },
               { text: "Normalize Audio", link: "/tools/audio/normalize-audio" },
               { text: "Fade Audio", link: "/tools/audio/fade-audio" },
               { text: "Reverse Audio", link: "/tools/audio/reverse-audio" },
@@ -517,9 +527,9 @@ function buildBaseTheme() {
               { text: "Repair PDF", link: "/tools/pdf/repair-pdf" },
               { text: "Web-Optimize PDF", link: "/tools/pdf/linearize-pdf" },
               { text: "Grayscale PDF", link: "/tools/pdf/grayscale-pdf" },
-              { text: "PDF/A Convert", link: "/tools/pdf/pdfa-convert" },
+              { text: "PDF/A Converter", link: "/tools/pdf/pdfa-convert" },
               { text: "Crop PDF", link: "/tools/pdf/crop-pdf" },
-              { text: "N-up PDF", link: "/tools/pdf/nup-pdf" },
+              { text: "Pages Per Sheet (N-up)", link: "/tools/pdf/nup-pdf" },
               { text: "Booklet PDF", link: "/tools/pdf/booklet-pdf" },
               { text: "Watermark PDF", link: "/tools/pdf/watermark-pdf" },
               { text: "PDF Page Numbers", link: "/tools/pdf/pdf-page-numbers" },
@@ -545,7 +555,7 @@ function buildBaseTheme() {
               { text: "Markdown to Word", link: "/tools/files/markdown-to-docx" },
               { text: "Markdown to HTML", link: "/tools/files/markdown-to-html" },
               { text: "Markdown to PDF", link: "/tools/files/markdown-to-pdf" },
-              { text: "Convert EPUB", link: "/tools/files/epub-convert" },
+              { text: "Convert from EPUB", link: "/tools/files/epub-convert" },
               { text: "Convert to EPUB", link: "/tools/files/to-epub" },
               { text: "Chart Maker", link: "/tools/files/chart-maker" },
               { text: "CSV to Excel", link: "/tools/files/csv-excel" },
@@ -553,7 +563,7 @@ function buildBaseTheme() {
               { text: "JSON to XML", link: "/tools/files/json-xml" },
               { text: "Split CSV", link: "/tools/files/split-csv" },
               { text: "Merge CSVs", link: "/tools/files/merge-csvs" },
-              { text: "YAML / JSON", link: "/tools/files/yaml-json" },
+              { text: "Convert YAML / JSON", link: "/tools/files/yaml-json" },
               { text: "XML to CSV", link: "/tools/files/xml-to-csv" },
               { text: "Create ZIP", link: "/tools/files/create-zip" },
               { text: "Extract ZIP", link: "/tools/files/extract-zip" },

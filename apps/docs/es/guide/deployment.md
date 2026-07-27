@@ -1,8 +1,9 @@
 ---
 description: "Despliega SnapOtter en producción con Docker. Requisitos de hardware, configuración de GPU y configuraciones de proxy inverso para Nginx, Traefik y Cloudflare."
-i18n_output_hash: 8d748bf9af34
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: 5c1aeeb99290
+i18n_hash_version: 2
 ---
 
 # Despliegue {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Cambie esto para implementaciones no locales
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
-Comprueba la detección de CUDA en los registros:
+### Verificar la aceleración de la GPU {#verify-gpu-acceleration}
+
+Verifique la detección de CUDA en los registros:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+Si las herramientas de IA se ejecutan en la CPU aunque `--gpus all` y NVIDIA Container Toolkit estén configurados correctamente, reinstale el paquete afectado (por ejemplo, Eliminación de fondo) desde **Configuración → Funciones de IA**. El instalador restaura la compilación de GPU de ONNX Runtime, que de otro modo una compilación de solo CPU extraída por otro paquete (como la transcripción) puede ocultar en el entorno de IA compartido. Si la reinstalación desde la interfaz de usuario no restaura la GPU en una imagen anterior, consulte la reparación manual en [problema n.° 490] (https://github.com/snapotter-hq/SnapOtter/issues/490).
 
 ## Requisitos de hardware {#hardware-requirements}
 
@@ -436,11 +441,11 @@ El error de arranque nombra el UID exacto que hay que usar, así que la vía má
 | `AUTH_ENABLED` | `true` | Habilita/deshabilita el requisito de inicio de sesión |
 | `DEFAULT_USERNAME` | `admin` | Nombre de usuario inicial del administrador |
 | `DEFAULT_PASSWORD` | `admin` | Contraseña inicial del administrador (cambio forzado en el primer inicio de sesión) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Límite de subida por archivo |
-| `MAX_BATCH_SIZE` | `100` | Máximo de archivos por solicitud de lote |
+| `MAX_UPLOAD_SIZE_MB` | `0` (ilimitado) | Límite de subida por archivo en MB. La imagen viene con `0`; una compilación desde el código fuente arranca en 100 |
+| `MAX_BATCH_SIZE` | `0` (ilimitado) | Máximo de archivos por solicitud de lote. La imagen viene con `0`; una compilación desde el código fuente arranca en 100 |
 | `RATE_LIMIT_PER_MIN` | `1000` | Solicitudes de API por minuto por IP (configura 0 para deshabilitar) |
 | `MAX_USERS` | `0` (ilimitado) | Máximo de cuentas de usuario |
-| `TRUST_PROXY` | `true` | Confiar en las cabeceras X-Forwarded-For del proxy inverso |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Qué pares pueden establecer la IP del cliente mediante `X-Forwarded-For`. Solo redes privadas de forma predeterminada |
 | `PUID` | `999` | Ejecutar como este UID (para permisos de montajes de enlace) |
 | `PGID` | `999` | Ejecutar como este GID (para permisos de montajes de enlace) |
 | `LOG_LEVEL` | `info` | Verbosidad del registro: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Proxy inverso {#reverse-proxy}
 
-SnapOtter establece `TRUST_PROXY=true` por defecto para que la limitación de tasa y el registro usen la IP real del cliente de las cabeceras `X-Forwarded-For`.
+`TRUST_PROXY` vale `loopback,linklocal,uniquelocal` de forma predeterminada, así que SnapOtter solo cree la cabecera `X-Forwarded-For` de un par que esté en una red privada. Un proxy inverso en el mismo host, en una red de Docker o en tu LAN es de confianza desde el primer momento, de modo que la limitación de tasa, el limitador de fuerza bruta del inicio de sesión, el registro de auditoría y la lista de IP permitidas de la edición enterprise ven la IP real del cliente sin configurar nada.
+
+Pon `TRUST_PROXY=true` solo cuando el proxy que tienes delante llegue a SnapOtter desde una dirección **pública**, por ejemplo un balanceador de carga en la nube situado en otra red. En una instancia expuesta directamente, ese valor deja `request.ip` en manos del atacante, porque quien va rotando la cabecera consigue un contador de límite de tasa nuevo en cada solicitud.
+
+Dos cosas conviene saber antes de ponerse a medir IP de cliente. Docker Desktop en macOS y Windows sirve un puerto publicado a través de un proxy en espacio de usuario que reescribe todas las direcciones de origen a la puerta de enlace de la VM `192.168.65.1`, así que ahí ningún valor de `TRUST_PROXY` recupera al cliente real; despliega en Linux cualquier cosa expuesta a internet. Y en cualquier plataforma, llegar a un puerto publicado por `localhost` se observa como la puerta de enlace del puente y no como tu cliente, de manera que una prueba en localhost no dice nada sobre cómo se atribuye un cliente real. La tabla completa de valores de `TRUST_PROXY` y la advertencia sobre Docker Desktop están en [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy).
+
+Dos cosas importan para cada proxy a continuación: permitir cuerpos de solicitud (cargas) de gran tamaño y no almacenar en búfer las respuestas. Un proxy de almacenamiento en búfer de respuesta interrumpe el progreso de SSE y, de manera más visible, hace que la descarga de un archivo grande "comience pero nunca termine", porque el proxy retiene el archivo completo antes de pasarlo. SnapOtter envía `X-Accel-Buffering: no` en las descargas para que nginx las transmita incluso si el almacenamiento en búfer se deja activado en otro lugar, pero los servidores proxy distintos de nginx necesitan que el búfer de respuesta esté deshabilitado explícitamente (se muestra en cada configuración a continuación). Si una descarga se detiene parcialmente, lo primero que debe verificar es un proxy de almacenamiento en búfer al frente.
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # Transmita respuestas en lugar de almacenar en búfer: necesario para el progreso de SSE (lotes, IA, instalaciones de funciones) y para descargas de archivos grandes.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` deshabilita el almacenamiento en búfer de la respuesta, que es necesario para los eventos de progreso SSE (procesamiento por lotes, herramientas de IA, instalaciones de funciones). Los tiempos de espera extendidos permiten que las subidas de archivos grandes se completen sin que Caddy cierre la conexión antes de tiempo.
+`flush_interval -1` deshabilita el almacenamiento en búfer de respuesta, que es necesario para los eventos de progreso de SSE (procesamiento por lotes, herramientas de inteligencia artificial, instalaciones de funciones) y para que las descargas de archivos grandes se transmitan en lugar de detenerse. Los tiempos de espera extendidos permiten que se completen las cargas de archivos grandes sin que Caddy cierre la conexión antes de tiempo.
 
 ### Túneles de Cloudflare {#cloudflare-tunnels}
 

@@ -8,12 +8,12 @@ How to set up a local development environment and contribute code to SnapOtter.
 
 ## Prerequisites {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (required for local Postgres + Redis, container builds, and AI features)
 - Git
 
-Python 3.10+ is only needed if you are working on the AI/ML sidecar (background removal, upscaling, OCR).
+Python 3.11+ is only needed if you are working on the AI/ML sidecar (background removal, upscaling, OCR).
 
 ## Setup {#setup}
 
@@ -29,10 +29,10 @@ This starts two dev servers:
 
 | Service  | URL                      | Notes                              |
 |----------|--------------------------|------------------------------------|
-| Frontend | http://localhost:1349     | Vite dev server, proxies /api      |
+| Frontend | http://localhost:1351     | Vite dev server, proxies /api      |
 | Backend  | http://localhost:13490    | Fastify API (accessed via proxy)   |
 
-Open http://localhost:1349 in your browser. Login with `admin` / `admin`. You will be prompted to change the password on first login.
+Open http://localhost:1351 in your browser. Login with `admin` / `admin`. You will be prompted to change the password on first login.
 
 ## Project structure {#project-structure}
 
@@ -216,6 +216,17 @@ Use BuildKit cache mounts for faster rebuilds:
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## Release version domains {#release-version-domains}
+
+SnapOtter intentionally has three version domains. Do not copy one domain into another during a release:
+
+- The application release version covers the root manifest, all private workspace packages and `APP_VERSION`. Semantic-release supplies this value, and `pnpm version:sync <version>` updates every workspace before an application release.
+- OpenAPI `info.version` is the stable public API-major contract. All localized specifications stay on `<major>.0.0` for compatible application releases and change only when the API contract moves to a new major version.
+- `docker/feature-manifest.json` keeps `imageVersion: 2.0.0` as the immutable legacy feature-bundle storage epoch. Those v2 archive paths are not application package versions. Accurate OCR uses runtime format v3 and records its application release provenance separately.
+
+`tests/unit/infra/release-version-policy.test.ts` enforces these boundaries. A new version domain or migration must update that contract and the relevant artifact migration design together.
+The independent API and legacy-bundle values live in `config/release-version-policy.json`; application version synchronization must never rewrite that policy file implicitly.
 
 ## Environment variables {#environment-variables}
 

@@ -1,8 +1,9 @@
 ---
 description: "كيفية المساهمة في SnapOtter. تقارير الأخطاء، طلبات الميزات، طلبات السحب، ومتطلبات اتفاقية ترخيص المساهم (CLA)."
-i18n_source_hash: 528802503035
+i18n_source_hash: 6c920a5f83e0
 i18n_provenance: human
-i18n_output_hash: 1065d8b688c4
+i18n_output_hash: ec01b666560b
+i18n_hash_version: 2
 ---
 
 # المساهمة {#contributing}
@@ -53,7 +54,7 @@ i18n_output_hash: 1065d8b688c4
 
 ### المتطلبات المسبقة {#prerequisites}
 
-- Node.js 22+
+- Node.js 22.22+
 - pnpm 9+
 - Python 3.11+ (لأدوات الذكاء الاصطناعي فقط)
 - Docker (اختياري، لاختبار التكامل الكامل)
@@ -71,7 +72,7 @@ docker compose -f docker-compose.dev.yml up -d
 # Install dependencies
 pnpm install
 
-# Start dev servers (web on :1349, API on :13490)
+# Start dev servers (web on :1351, API on :13490)
 pnpm dev
 ```
 

@@ -3,6 +3,7 @@
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   Eye,
   EyeOff,
@@ -95,6 +96,7 @@ export function LayersPanel() {
   const flattenAll = useEditorStore((s) => s.flattenAll);
 
   const activeLayer = layers.find((l) => l.id === activeLayerId);
+  const activeLayerIndex = layers.findIndex((layer) => layer.id === activeLayerId);
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<{
@@ -167,11 +169,7 @@ export function LayersPanel() {
       </div>
 
       {/* Layer list */}
-      <div
-        className="flex-1 overflow-y-auto py-1 min-h-0"
-        role="listbox"
-        aria-label={t.a11y.layers}
-      >
+      <ul className="flex-1 overflow-y-auto py-1 min-h-0" aria-label={t.a11y.layers}>
         {displayLayers.map((layer) => {
           const realIndex = layers.findIndex((l) => l.id === layer.id);
           return (
@@ -190,7 +188,7 @@ export function LayersPanel() {
             />
           );
         })}
-      </div>
+      </ul>
 
       {/* Layer effects section (only when an object is selected) */}
       {selectedObject && (
@@ -210,6 +208,28 @@ export function LayersPanel() {
           data-testid="add-layer-btn"
         >
           <Plus size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={() => reorderLayers(activeLayerIndex, activeLayerIndex + 1)}
+          disabled={!activeLayer || activeLayerIndex >= layers.length - 1}
+          className="flex items-center justify-center h-7 w-7 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          title={t.automate.moveUp}
+          aria-label={`${t.automate.moveUp}: ${activeLayer?.name ?? ""}`}
+          data-testid="move-layer-up-btn"
+        >
+          <ChevronUp size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={() => reorderLayers(activeLayerIndex, activeLayerIndex - 1)}
+          disabled={!activeLayer || activeLayerIndex <= 0}
+          className="flex items-center justify-center h-7 w-7 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          title={t.automate.moveDown}
+          aria-label={`${t.automate.moveDown}: ${activeLayer?.name ?? ""}`}
+          data-testid="move-layer-down-btn"
+        >
+          <ChevronDown size={16} />
         </button>
         <button
           type="button"
@@ -346,7 +366,7 @@ function LayerRow({
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(layer.name);
   const inputRef = useRef<HTMLInputElement>(null);
-  const rowRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLLIElement>(null);
 
   // Drag reorder state
   const dragState = useRef<{
@@ -466,7 +486,7 @@ function LayerRow({
   );
 
   return (
-    <div
+    <li
       ref={rowRef}
       className={cn(
         "flex items-center gap-1.5 px-1.5 py-1 rounded cursor-pointer select-none group",
@@ -474,19 +494,11 @@ function LayerRow({
         isActive && "bg-primary/10 border-s-2 border-primary",
         !isActive && "border-s-2 border-transparent",
       )}
-      role="option"
-      aria-selected={isActive}
+      aria-current={isActive ? "true" : undefined}
       onPointerDown={handlePointerDown}
       onContextMenu={onContextMenu}
       data-testid={`layer-row-${layer.id}`}
       data-layer-id={layer.id}
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
     >
       {/* Visibility toggle */}
       <button
@@ -538,6 +550,7 @@ function LayerRow({
             ref={inputRef}
             type="text"
             value={editName}
+            aria-label={layer.name}
             onChange={(e) => setEditName(e.target.value)}
             onBlur={commitRename}
             onKeyDown={handleKeyDown}
@@ -548,6 +561,7 @@ function LayerRow({
         ) : (
           <button
             type="button"
+            aria-pressed={isActive}
             className={cn(
               "block text-xs truncate text-start bg-transparent border-0 p-0 w-full cursor-pointer",
               isActive ? "text-foreground font-medium" : "text-muted-foreground",
@@ -561,7 +575,7 @@ function LayerRow({
           </button>
         )}
       </div>
-    </div>
+    </li>
   );
 }
 

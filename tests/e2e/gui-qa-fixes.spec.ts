@@ -1,8 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./helpers";
 
 test.describe("QA Fixes Verification", () => {
-  test.use({ storageState: ".playwright/.auth/qa-user.json" });
-
   test("home page loads after login", async ({ page }) => {
     await page.goto("/");
     await page.waitForLoadState("networkidle");
@@ -20,13 +18,9 @@ test.describe("QA Fixes Verification", () => {
     await expect(page.locator("text=Resize").first()).toBeVisible({ timeout: 10_000 });
   });
 
-  test("/tools/:toolId redirects to /:toolId", async ({ page }) => {
+  test("noncanonical section for a known tool shows not-found state", async ({ page }) => {
     await page.goto("/tools/resize");
-    await page.waitForTimeout(2_000);
-    const url = page.url();
-    // After the fix, /tools/resize should redirect to /resize
-    // On pre-fix builds, it stays at /tools/resize (treated as unknown tool)
-    expect(url).toContain("/resize");
+    await expect(page.getByText(/tool not found/i)).toBeVisible();
   });
 
   test("invalid tool slug shows not-found state", async ({ page }) => {
@@ -40,18 +34,12 @@ test.describe("QA Fixes Verification", () => {
   test("multi-segment invalid URL shows 404 page", async ({ page }) => {
     await page.goto("/some/deep/nested/invalid/path");
     await page.waitForLoadState("networkidle");
-    // After the fix, should show 404 page. On pre-fix, shows blank.
-    // At minimum, verify the page has some visible content (not completely blank)
-    const has404 = await page
+    const notFound = page
       .locator("text=404")
       .or(page.locator("text=not found"))
       .or(page.locator("text=Page not found"))
-      .first()
-      .isVisible({ timeout: 5_000 })
-      .catch(() => false);
-    if (!has404) {
-      test.skip(true, "404 catch-all route not present in this build (pre-fix)");
-    }
+      .first();
+    await expect(notFound).toBeVisible({ timeout: 10_000 });
   });
 
   test("privacy page renders", async ({ page }) => {

@@ -1,8 +1,9 @@
 ---
 description: "명령 하나로 Docker에 SnapOtter를 설치. Docker Compose 설정, 소스에서 빌드하기, 전체 기능 개요 포함."
-i18n_output_hash: 55c67edda625
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: 099b08f91118
+i18n_hash_version: 2
 ---
 
 # 시작하기 {#getting-started}
@@ -17,7 +18,7 @@ i18n_provenance: human
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-이 단일 컨테이너는 필요한 모든 것을 실행한다. `DATABASE_URL`이 설정되어 있지 않으면, 루프백 인터페이스에서 자체 PostgreSQL과 Redis를 시작하고(임베디드 모드) 모든 데이터를 `SnapOtter-data` 볼륨에 보관한다. SnapOtter를 사용해 보거나 홈랩에서 셀프 호스팅하기에 가장 빠른 방법이다. 프로덕션에서는 PostgreSQL과 Redis를 각자의 컨테이너에 두는 아래의 [Docker Compose](#docker-compose) 스택을 실행하라. 임베디드 모드는 root로 실행되며(기본값), `DATABASE_URL`을 설정하는 즉시 자동으로 꺼진다.
+이 단일 컨테이너는 필요한 모든 것을 실행합니다. `DATABASE_URL`를 설정하지 않으면 루프백 인터페이스(임베디드 모드)에서 자체 PostgreSQL 및 Redis를 시작하고 모든 데이터를 `SnapOtter-data` 볼륨에 유지합니다. 홈랩에서 SnapOtter 또는 자체 호스트를 시도하는 가장 빠른 방법입니다. 프로덕션의 경우 PostgreSQL 및 Redis를 자체 컨테이너에 유지하는 [표준 Docker Compose 스택](#docker-compose)을 사용합니다. 임베디드 모드는 루트(기본값)로 실행되며 `DATABASE_URL`를 설정하자마자 자동으로 꺼집니다.
 
 Raspberry Pi나 오래된 노트북, 작은 VPS에 설치할 예정이라면 [저사양 환경 설정](/ko/guide/low-resource)에서 조정된 설치 가이드와 제한된 하드웨어에서 기대할 수 있는 것을 확인하라.
 
@@ -40,7 +41,7 @@ SnapOtter에는 익명 제품 애널리틱스가 기본으로 포함되어 있�
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)이 필요하다. CUDA를 사용할 수 없으면 자동으로 CPU로 폴백한다. VA-API, Quick Sync, OpenCL을 통한 Intel/AMD iGPU 가속은 현재 AI 추론에 지원되지 않는다. 벤치마크는 [Docker 태그](/ko/guide/docker-tags)를 참고하라.
+[NVIDIA 컨테이너 툴킷](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)이 필요합니다. CUDA를 사용할 수 없으면 자동으로 CPU로 대체됩니다. VA-API, Quick Sync 또는 OpenCL을 통한 Intel/AMD iGPU 가속은 현재 AI 추론에 지원되지 않습니다. 벤치마크는 [Docker 태그](/ko/guide/docker-tags)를 참조하세요. `--gpus all`에도 불구하고 AI 도구가 CPU에서 실행되는 경우 [GPU 가속 확인](/ko/guide/deployment#verify-gpu-acceleration)을 참조하세요.
 :::
 
 ::: details GHCR에서도 제공
@@ -51,67 +52,33 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 두 레지스트리 모두 릴리스마다 동일한 이미지를 게시한다.
 :::
 
-## Docker Compose {#docker-compose}
+## 도커 컴포즈 {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+이 페이지에서 축약된 Compose 예시를 복사하는 대신 각 릴리스에서 유지관리되고 테스트된 프로덕션 파일을 사용하세요.
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-모든 환경 변수는 [구성](/ko/guide/configuration)을 참고하라.
+표준 [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml)에는 4개의 런타임 볼륨, 상태 확인, 리소스 제한, 내구성 있는 Redis 구성, 고정된 데이터베이스/캐시 이미지 및 현재 컨테이너 강화가 모두 포함됩니다. 처음 로그인한 후 즉시 기본 관리자 비밀번호를 변경하세요. 재현 가능한 배포를 위해 `latest`를 따르는 대신 SnapOtter 애플리케이션 이미지를 확인한 릴리스 태그 또는 다이제스트에 고정하세요.
+
+모든 환경 변수는 [구성](/ko/guide/configuration)을 참조하고 비밀, 네트워크 정책 및 백업 지침은 [보안 및 강화](/ko/guide/security)를 참조하세요.
 
 ## 소스에서 빌드 {#build-from-source}
 
-**전제 조건:** Node.js 22+, pnpm 9+, Docker (Postgres + Redis용), Python 3.10+ (AI 기능용), Git.
+**전제 조건:** Node.js 22.22+, pnpm 9+, Docker (Postgres + Redis용), Python 3.11+ (AI 기능용), Git.
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- 프론트엔드: [http://localhost:1349](http://localhost:1349)
+- 프론트엔드: [http://localhost:1351](http://localhost:1351)
 - 백엔드: [http://localhost:13490](http://localhost:13490)
 
 ## 할 수 있는 것 {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | 모달리티 | 개수 | 예시 도구 |
 |----------|-------|---------------|
-| **이미지** | 105 | 크기 조정, 자르기, 압축, 변환, 배경 제거, 업스케일, OCR, 워터마크, 콜라주, 컬러화, GIF 도구, 형식 프리셋 |
+| **이미지** | 107 | 크기 조정, 자르기, 압축, 변환, 배경 제거, 업스케일, OCR, 워터마크, 콜라주, 컬러화, GIF 도구, 형식 프리셋 |
 | **비디오** | 57 | 트림, 자르기, 압축, 변환, 병합, 오디오 추출, 자동 자막, 비디오→GIF, 크기 조정, 안정화, 형식 프리셋 |
 | **오디오** | 27 | 트림, 병합, 변환, 노멀라이즈, 노이즈 감소, 전사, 피치 시프트, 페이드, 벨소리 제작기, 형식 프리셋 |
-| **PDF / 문서** | 42 | 병합, 분할, 압축, OCR, 워터마크, 편집(리댁트), Word→PDF, Excel→PDF, 회전, 보호, 복구 |
-| **파일** | 10 | CSV→JSON, JSON→XML, CSV 병합, CSV 분할, ZIP 생성, ZIP 추출, 차트 제작기, YAML/JSON |
+| **PDF / 문서** | 29 | 병합, 분할, 압축, OCR, 워터마크, 편집(리댁트), Word→PDF, Excel→PDF, 회전, 보호, 복구 |
+| **파일** | 23 | CSV→JSON, JSON→XML, CSV 병합, CSV 분할, ZIP 생성, ZIP 추출, 차트 제작기, YAML/JSON |
 
 ### 파이프라인 {#pipelines}
 

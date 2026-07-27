@@ -1,8 +1,9 @@
 ---
 description: "Installera SnapOtter med Docker i ett enda kommando. Inkluderar Docker Compose-konfiguration, byggande från källkod och en fullständig funktionsöversikt."
-i18n_output_hash: 4b247783a830
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: 2dc08df1543e
+i18n_hash_version: 2
 ---
 
 # Kom igång {#getting-started}
@@ -17,7 +18,7 @@ Utforska hela gränssnittet på [demo.snapotter.com](https://demo.snapotter.com)
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Denna enda container kör allt den behöver: utan `DATABASE_URL` angivet startar den sin egen PostgreSQL och Redis på loopback-gränssnittet (inbäddat läge) och håller all data i `SnapOtter-data`-volymen. Det är det snabbaste sättet att prova SnapOtter eller att själv hosta i ett hemmalabb. För produktion, kör [Docker Compose](#docker-compose)-stacken nedan, som håller PostgreSQL och Redis i sina egna containrar. Inbäddat läge körs som root (standardvärdet) och stängs av automatiskt så snart du anger `DATABASE_URL`.
+Denna enda behållare kör allt den behöver: utan `DATABASE_URL`-uppsättning startar den sin egen PostgreSQL och Redis på loopback-gränssnittet (inbäddat läge) och behåller all data i `SnapOtter-data`-volymen. Det är det snabbaste sättet att prova SnapOtter eller självvärd på ett homelab. För produktion, använd [kanoniska Docker Compose-stacken](#docker-compose), som håller PostgreSQL och Redis i sina egna behållare. Inbäddat läge körs som root (standard) och stängs av automatiskt så snart du ställer in `DATABASE_URL`.
 
 Installerar du på en Raspberry Pi, en gammal bärbar dator eller en liten VPS? Se [Resurssnåla installationer](/sv/guide/low-resource) för en anpassad genomgång och vad du kan förvänta dig av begränsad hårdvara.
 
@@ -40,7 +41,7 @@ Lägg till `--gpus all` för NVIDIA CUDA-accelererad bakgrundsborttagning, uppsk
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Kräver [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Faller tillbaka till CPU automatiskt när CUDA inte är tillgängligt. Intel/AMD iGPU-acceleration via VA-API, Quick Sync eller OpenCL stöds inte för AI-inferens i dagsläget. Se [Docker-taggar](/sv/guide/docker-tags) för benchmarktester.
+Kräver [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Faller tillbaka till CPU automatiskt när CUDA inte är tillgänglig. Intel/AMD iGPU-acceleration genom VA-API, Quick Sync eller OpenCL stöds inte för AI-inferens idag. Se [Docker Tags](/sv/guide/docker-tags) för riktmärken. Om AI-verktyg körs på CPU trots `--gpus all`, se [Verifiera GPU-acceleration](/sv/guide/deployment#verify-gpu-acceleration).
 :::
 
 ::: details Även på GHCR
@@ -53,65 +54,31 @@ Båda registren publicerar samma avbildning vid varje utgåva.
 
 ## Docker Compose {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+Använd produktionsfilen som underhålls och testas med varje release istället för att kopiera ett förkortat Compose-exempel från den här sidan:
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-Se [Konfiguration](/sv/guide/configuration) för alla miljövariabler.
+Den kanoniska [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) inkluderar alla fyra körtidsvolymer, hälsokontroller, resursgränser, hållbar Redis-konfiguration, fästa databas/cache-bilder och den aktuella behållarhärdningen. Ändra standardlösenordet för administratören direkt efter första inloggningen. För en reproducerbar distribution, fäst SnapOtter-applikationsbilden till releasetaggen eller sammanfattningen du verifierade istället för att följa `latest`.
+
+Se [Configuration](/sv/guide/configuration) för alla miljövariabler och [Security & Hardening](/sv/guide/security) för hemligheter, nätverkspolicy och säkerhetskopieringsvägledning.
 
 ## Bygg från källkod {#build-from-source}
 
-**Förutsättningar:** Node.js 22+, pnpm 9+, Docker (för Postgres + Redis), Python 3.10+ (för AI-funktioner), Git.
+**Förutsättningar:** Node.js 22.22+, pnpm 9+, Docker (för Postgres + Redis), Python 3.11+ (för AI-funktioner), Git.
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- Frontend: [http://localhost:1349](http://localhost:1349)
+- Frontend: [http://localhost:1351](http://localhost:1351)
 - Backend: [http://localhost:13490](http://localhost:13490)
 
 ## Vad du kan göra {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | Modalitet | Antal | Exempelverktyg |
 |----------|-------|---------------|
-| **Bild** | 105 | Ändra storlek, beskär, komprimera, konvertera, ta bort bakgrund, uppskala, OCR, vattenmärke, collage, färglägg, GIF-verktyg, formatförinställningar |
+| **Bild** | 107 | Ändra storlek, beskär, komprimera, konvertera, ta bort bakgrund, uppskala, OCR, vattenmärke, collage, färglägg, GIF-verktyg, formatförinställningar |
 | **Video** | 57 | Klipp, beskär, komprimera, konvertera, slå samman, extrahera ljud, autotextning, video till GIF, ändra storlek, stabilisera, formatförinställningar |
 | **Ljud** | 27 | Klipp, slå samman, konvertera, normalisera, brusreducering, transkribera, tonhöjdsskift, tona, ringsignalsskapare, formatförinställningar |
-| **PDF / dokument** | 42 | Slå samman, dela, komprimera, OCR, vattenmärke, redigera bort, Word till PDF, Excel till PDF, rotera, skydda, reparera |
-| **Filer** | 10 | CSV till JSON, JSON till XML, slå samman CSV-filer, dela CSV, skapa ZIP, extrahera ZIP, diagramskapare, YAML/JSON |
+| **PDF / dokument** | 29 | Slå samman, dela, komprimera, OCR, vattenmärke, redigera bort, Word till PDF, Excel till PDF, rotera, skydda, reparera |
+| **Filer** | 23 | CSV till JSON, JSON till XML, slå samman CSV-filer, dela CSV, skapa ZIP, extrahera ZIP, diagramskapare, YAML/JSON |
 
 ### Pipelines {#pipelines}
 

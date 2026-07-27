@@ -1,6 +1,6 @@
 // apps/web/src/components/editor/editor-right-panel.tsx
 import { ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "@/contexts/i18n-context";
 import { cn } from "@/lib/utils";
 import { useEditorStore } from "@/stores/editor-store";
@@ -34,6 +34,7 @@ export function EditorRightPanel() {
   const setTab = useEditorStore((s) => s.setRightPanelTab);
   const togglePanel = useEditorStore((s) => s.toggleRightPanel);
   const sourceImageUrl = useEditorStore((s) => s.sourceImageUrl);
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const [width, setWidth] = useState<number>(() => {
     if (typeof window === "undefined") return DEFAULT_PANEL_WIDTH;
@@ -67,6 +68,31 @@ export function EditorRightPanel() {
     [width],
   );
 
+  const focusTab = useCallback(
+    (index: number) => {
+      const wrappedIndex = (index + TABS.length) % TABS.length;
+      setTab(TABS[wrappedIndex].id);
+      tabRefs.current[wrappedIndex]?.focus();
+    },
+    [setTab],
+  );
+
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+      let targetIndex: number | undefined;
+      if (event.key === "ArrowRight") targetIndex = index + 1;
+      else if (event.key === "ArrowLeft") targetIndex = index - 1;
+      else if (event.key === "Home") targetIndex = 0;
+      else if (event.key === "End") targetIndex = TABS.length - 1;
+      if (targetIndex === undefined) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      focusTab(targetIndex);
+    },
+    [focusTab],
+  );
+
   if (!visible) {
     return (
       <button
@@ -98,25 +124,34 @@ export function EditorRightPanel() {
       {sourceImageUrl && <NavigatorPanel />}
 
       {/* Tabs */}
-      <div className="flex items-center border-b border-border" role="tablist">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => setTab(tab.id)}
-            className={cn(
-              "flex-1 py-2 text-xs font-medium text-center transition-colors",
-              activeTab === tab.id
-                ? "text-foreground border-b-2 border-primary"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            data-testid={`tab-${tab.id}`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="flex items-center border-b border-border">
+        <div className="flex flex-1" role="tablist" aria-label={t.editor.menu.view.panels}>
+          {TABS.map((tab, index) => (
+            <button
+              key={tab.id}
+              ref={(element) => {
+                tabRefs.current[index] = element;
+              }}
+              type="button"
+              role="tab"
+              id={`editor-tab-${tab.id}`}
+              aria-controls="editor-panel"
+              aria-selected={activeTab === tab.id}
+              tabIndex={activeTab === tab.id ? 0 : -1}
+              onClick={() => setTab(tab.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
+              className={cn(
+                "flex-1 py-2 text-xs font-medium text-center transition-colors",
+                activeTab === tab.id
+                  ? "text-foreground border-b-2 border-primary"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              data-testid={`tab-${tab.id}`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={togglePanel}
@@ -129,7 +164,12 @@ export function EditorRightPanel() {
 
       {/* Tab content. `min-h-0` lets this flex child shrink so it scrolls
           internally instead of pushing the color panel below the viewport. */}
-      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2">
+      <div
+        id="editor-panel"
+        role="tabpanel"
+        aria-labelledby={`editor-tab-${activeTab}`}
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2"
+      >
         {activeTab === "layers" && <LayersPanel />}
         {activeTab === "adjustments" && <AdjustmentsPanel />}
         {activeTab === "history" && <HistoryPanel />}

@@ -14,10 +14,63 @@
   --vp-button-brand-active-border: transparent;
   --vp-button-brand-active-text: #fff;
   --vp-button-brand-active-bg: #7A3D10;
+
+  /* Inline `code` never sits on white. VitePress tints it with --vp-c-default-soft
+     (#e7e9ec in tables and prose) and custom blocks tint it further (#f7dcca), which
+     drops brand-1 to 4.34:1 and 4.03:1. The darker ink clears AA on both: 5.62:1 and
+     5.22:1. This was 482 failures on the REST page alone. */
+  --vp-code-color: #8F4712;
+  /* The language label above a code block was #929295 on #f6f6f7, 2.87:1. */
+  --vp-code-lang-color: #5C5C60;
 }
+/* Inside a tip/info block VitePress paints inline code with brand-1 over the brand
+   tint directly, so --vp-code-color never reaches it: 4.03:1. Dark mode was fine. */
+.vp-doc .custom-block :not(pre) > code {
+  color: #8F4712;
+}
+
+.dark .vp-doc .custom-block :not(pre) > code {
+  color: var(--vp-c-brand-1);
+}
+
 .dark {
   --vp-c-brand-1: #F0A766;
   --vp-c-brand-2: #F09550;
   --vp-c-brand-3: #A85518;
   --vp-c-brand-soft: rgba(240, 149, 80, 0.16);
+}
+
+/* Tablet navbar overflow (SITE-20260726-011).
+
+   VitePress swaps to the desktop nav at 768px. Several locales carry top-level
+   labels far longer than English (es 55 characters, pt-BR 54, th 53, ru 52,
+   de 48 against en 33), so between 768px and the 960px sidebar breakpoint the
+   navbar's right edge landed outside the viewport and every docs page in those
+   languages scrolled sideways.
+
+   Moving that one switch to 960px puts the top-level nav back in the hamburger
+   overlay for the 768-959 band. Nothing becomes unreachable: the sidebar is
+   already opened from VPLocalNav's menu button below 960px, and this is exactly
+   the arrangement VitePress uses below 768px. VPNavScreen is v-if-mounted, so
+   the display override only ever applies to an open overlay.
+
+   One upstream wart is inherited: useNav closes an open overlay on resize past
+   768px, so dragging the window across that width inside the band shuts the
+   menu. Reopening it works.
+
+   The declarations carry !important because VitePress ships these rules from
+   Vue `<style scoped>` blocks, which compile to `.VPNavBarMenu[data-v-hash]`
+   and outrank a plain class selector however late it loads. */
+@media (min-width: 768px) and (max-width: 959.9px) {
+  .VPNavBarMenu {
+    display: none !important;
+  }
+
+  .VPNavBarHamburger {
+    display: block !important;
+  }
+
+  .VPNavScreen {
+    display: block !important;
+  }
 }

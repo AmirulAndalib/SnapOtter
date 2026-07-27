@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SYSTEM="${1:?Usage: bench.sh <system-name> <fixture-dir> [port]}"
-FIXTURE_DIR="${2:?Usage: bench.sh <system-name> <fixture-dir> [port]}"
-PORT="${3:-1349}"
-BASE_URL="http://localhost:${PORT}"
-RESULTS_FILE="bench-results-${SYSTEM}.jsonl"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/lib/job-aware.sh"
+source "${SCRIPT_DIR}/lib/metrics.sh"
 
-CONTAINER_NAME="SnapOtter"
+SYSTEM="${1:?Usage: bench.sh <system-name> <fixture-dir> [port] [container]}"
+FIXTURE_DIR="${2:?Usage: bench.sh <system-name> <fixture-dir> [port] [container]}"
+PORT="${3:-1349}"
+CONTAINER_REF="${4:-${SNAPOTTER_BENCH_CONTAINER:-}}"
+RUN_ID="${SNAPOTTER_BENCH_RUN_ID:-$$_${RANDOM}_${RANDOM}}"
+if [[ ! "$SYSTEM" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
+  echo "system-name must be 1-64 letters, digits, underscores, or hyphens" >&2
+  exit 2
+fi
+if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]]; then
+  echo "SNAPOTTER_BENCH_RUN_ID must be 1-64 letters, digits, underscores, or hyphens" >&2
+  exit 2
+fi
+BASE_URL="http://localhost:${PORT}"
+RESULTS_FILE="bench-results-${SYSTEM}-${RUN_ID}.jsonl"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
@@ -18,36 +30,33 @@ get_token() {
 }
 
 get_container_id() {
-  docker ps -q -f name="${CONTAINER_NAME}" | head -1
-}
+  if [ -z "$CONTAINER_REF" ]; then
+    return 0
+  fi
 
-docker_mem_mb() {
-  local cid="$1"
-  docker stats "$cid" --no-stream --format "{{.MemUsage}}" 2>/dev/null | awk -F/ '{gsub(/[^0-9.]/, "", $1); if($1+0 > 0) print $1; else print 0}'
-}
-
-docker_cpu_pct() {
-  local cid="$1"
-  docker stats "$cid" --no-stream --format "{{.CPUPerc}}" 2>/dev/null | tr -d '%'
+  local cid running
+  cid=$(docker inspect --type container --format '{{.Id}}' "$CONTAINER_REF" 2>/dev/null) || return 1
+  running=$(docker inspect --type container --format '{{.State.Running}}' "$cid" 2>/dev/null) || return 1
+  [ "$running" = "true" ] || return 1
+  printf '%s\n' "$cid"
 }
 
 record() {
-  local tier="$1" tool="$2" variant="$3" time_s="$4" pass="$5" output_size="${6:-0}" mem_mb="${7:-0}" cpu_pct="${8:-0}" extra="${9:-}"
-  printf '{"system":"%s","tier":"%s","tool":"%s","variant":"%s","time_s":%s,"pass":%s,"output_size":%s,"mem_mb":%s,"cpu_pct":%s%s}\n' \
-    "$SYSTEM" "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_mb" "$cpu_pct" "$extra" >> "$RESULTS_FILE"
+  local tier="$1" tool="$2" variant="$3" time_s="$4" pass="$5" output_size="${6:-0}" mem_mb="${7:-0}" cpu_pct="${8:-0}"
+  local admission_status="${9:-0}" completion_status="${10:-failed}" completion_latency_s="${11:-0}" output_mime="${12:-unknown}"
+  printf '{"system":"%s","tier":"%s","tool":"%s","variant":"%s","time_s":%s,"pass":%s,"output_size":%s,"mem_mb":%s,"cpu_pct":%s,"admission_status":%s,"completion_status":"%s","completion_latency_s":%s,"output_mime":"%s"}\n' \
+    "$SYSTEM" "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_mb" "$cpu_pct" "$admission_status" "$completion_status" "$completion_latency_s" "$output_mime" >> "$RESULTS_FILE"
 }
 
 bench_tool() {
-  local tier="$1" tool="$2" variant="$3" file="$4" settings="${5:-}" extra_args="${6:-}"
-  local cid time_s http_code mem_before mem_after cpu output_file pass output_size
+  local tier="$1" tool="$2" variant="$3" file="$4" settings="${5:-}" oracle="${6:-}"
+  local cid time_s http_code response_mime mem_after cpu admission_file artifact_file pass output_size
 
-  cid=$(get_container_id)
-  mem_before=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
+  cid="$BENCH_CONTAINER_ID"
+  admission_file=$(mktemp)
+  artifact_file=$(mktemp)
 
-  output_file=$(mktemp)
-  local timing_file=$(mktemp)
-
-  local curl_args=(-s -X POST "${BASE_URL}/api/v1/tools/${tool}" -H "Authorization: Bearer ${TOKEN}")
+  local curl_args=(-sS --max-time 300 -X POST "${BASE_URL}/api/v1/tools/${tool}" -H "Authorization: Bearer ${TOKEN}")
 
   if [ -n "$file" ] && [ "$file" != "NONE" ]; then
     curl_args+=(-F "file=@${file}")
@@ -57,47 +66,41 @@ bench_tool() {
     curl_args+=(-F "settings=${settings}")
   fi
 
-  if [ -n "$extra_args" ]; then
-    eval "curl_args+=($extra_args)"
-  fi
-
-  curl_args+=(-o "$output_file" -w "%{http_code} %{time_total}")
+  curl_args+=(-o "$admission_file" -w $'%{http_code}\t%{time_total}\t%{content_type}')
 
   local result
-  result=$(curl "${curl_args[@]}" 2>/dev/null) || result="000 0.000"
+  result=$(curl "${curl_args[@]}" 2>/dev/null) || result=$'000\t0.000\tapplication/octet-stream'
 
-  http_code=$(echo "$result" | awk '{print $1}')
-  time_s=$(echo "$result" | awk '{print $2}')
+  IFS=$'\t' read -r http_code time_s response_mime <<< "$result"
+  resolve_benchmark_response "$BASE_URL" "$TOKEN" "$http_code" "$response_mime" \
+    "$admission_file" "$artifact_file" "$time_s" "$BENCH_JOB_TIMEOUT_MS" "" "" "$oracle" || true
+  pass="$BENCH_PASS"
+  time_s="$BENCH_COMPLETION_LATENCY_S"
+  output_size="$BENCH_OUTPUT_SIZE"
 
   mem_after=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
   cpu=$(docker_cpu_pct "$cid" 2>/dev/null || echo "0")
 
-  output_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
+  record "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_after" "$cpu" \
+    "$BENCH_ADMISSION_STATUS" "$BENCH_COMPLETION_STATUS" "$BENCH_COMPLETION_LATENCY_S" "$BENCH_OUTPUT_MIME"
 
-  if [ "$http_code" = "200" ]; then
-    pass="true"
-  else
-    pass="false"
-  fi
+  log "$tier/$tool/$variant: ${time_s}s admission:${BENCH_ADMISSION_STATUS} completion:${BENCH_COMPLETION_STATUS} mime:${BENCH_OUTPUT_MIME} mem:${mem_after}MB pass:${pass}"
 
-  record "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_after" "$cpu"
-
-  log "$tier/$tool/$variant: ${time_s}s HTTP:${http_code} mem:${mem_after}MB pass:${pass}"
-
-  rm -f "$output_file" "$timing_file"
+  rm -f "$admission_file" "$artifact_file"
 }
 
 bench_tool_multifile() {
-  local tier="$1" tool="$2" variant="$3" settings="${4:-}"
-  shift 4
+  local tier="$1" tool="$2" variant="$3" settings="${4:-}" oracle="${5:-}"
+  shift 5
   local files=("$@")
 
-  local cid time_s http_code mem_after cpu output_file pass output_size
+  local cid time_s http_code response_mime mem_after cpu admission_file artifact_file pass output_size
 
-  cid=$(get_container_id)
-  output_file=$(mktemp)
+  cid="$BENCH_CONTAINER_ID"
+  admission_file=$(mktemp)
+  artifact_file=$(mktemp)
 
-  local curl_args=(-s -X POST "${BASE_URL}/api/v1/tools/${tool}" -H "Authorization: Bearer ${TOKEN}")
+  local curl_args=(-sS --max-time 300 -X POST "${BASE_URL}/api/v1/tools/${tool}" -H "Authorization: Bearer ${TOKEN}")
 
   for f in "${files[@]}"; do
     curl_args+=(-F "file=@${f}")
@@ -107,28 +110,25 @@ bench_tool_multifile() {
     curl_args+=(-F "settings=${settings}")
   fi
 
-  curl_args+=(-o "$output_file" -w "%{http_code} %{time_total}")
+  curl_args+=(-o "$admission_file" -w $'%{http_code}\t%{time_total}\t%{content_type}')
 
   local result
-  result=$(curl "${curl_args[@]}" 2>/dev/null) || result="000 0.000"
+  result=$(curl "${curl_args[@]}" 2>/dev/null) || result=$'000\t0.000\tapplication/octet-stream'
 
-  http_code=$(echo "$result" | awk '{print $1}')
-  time_s=$(echo "$result" | awk '{print $2}')
+  IFS=$'\t' read -r http_code time_s response_mime <<< "$result"
+  resolve_benchmark_response "$BASE_URL" "$TOKEN" "$http_code" "$response_mime" \
+    "$admission_file" "$artifact_file" "$time_s" "$BENCH_JOB_TIMEOUT_MS" "" "" "$oracle" || true
+  pass="$BENCH_PASS"
+  time_s="$BENCH_COMPLETION_LATENCY_S"
+  output_size="$BENCH_OUTPUT_SIZE"
 
   mem_after=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
   cpu=$(docker_cpu_pct "$cid" 2>/dev/null || echo "0")
-  output_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
+  record "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_after" "$cpu" \
+    "$BENCH_ADMISSION_STATUS" "$BENCH_COMPLETION_STATUS" "$BENCH_COMPLETION_LATENCY_S" "$BENCH_OUTPUT_MIME"
+  log "$tier/$tool/$variant: ${time_s}s admission:${BENCH_ADMISSION_STATUS} completion:${BENCH_COMPLETION_STATUS} mime:${BENCH_OUTPUT_MIME} pass:${pass}"
 
-  if [ "$http_code" = "200" ]; then
-    pass="true"
-  else
-    pass="false"
-  fi
-
-  record "$tier" "$tool" "$variant" "$time_s" "$pass" "$output_size" "$mem_after" "$cpu"
-  log "$tier/$tool/$variant: ${time_s}s HTTP:${http_code} pass:${pass}"
-
-  rm -f "$output_file"
+  rm -f "$admission_file" "$artifact_file"
 }
 
 run_n_times() {
@@ -141,43 +141,54 @@ run_n_times() {
 }
 
 F="${FIXTURE_DIR}"
-S="${F}/test-200x150.png"
-J="${F}/test-100x100.jpg"
-L="${F}/content/stress-large.jpg"
-P="${F}/content/portrait-color.jpg"
-BW="${F}/content/portrait-bw.jpeg"
-SVG="${F}/content/svg-logo.svg"
-GIF="${F}/content/animated-simpsons.gif"
-PDF="${F}/test-3page.pdf"
-EXIF="${F}/test-with-exif.jpg"
-FACE="${F}/content/multi-face.webp"
-OCR="${F}/content/ocr-chat.jpeg"
-OCRJP="${F}/content/ocr-japanese.png"
-ISO="${F}/content/portrait-isolated.png"
-HEAD="${F}/content/portrait-headshot.heic"
-REDEYE="${F}/content/red-eye.jpg"
-BARCODE="${F}/content/barcode.avif"
+S="${F}/image/valid/test-200x150.png"
+J="${F}/image/valid/test-100x100.jpg"
+L="${F}/image/valid/stress-large.jpg"
+P="${F}/image/valid/portrait-color.jpg"
+BW="${F}/image/valid/portrait-bw.jpeg"
+SVG="${F}/image/valid/svg-logo.svg"
+GIF="${F}/image/valid/animated-simpsons.gif"
+PDF="${F}/document/valid/test-3page.pdf"
+EXIF="${F}/image/valid/test-with-exif.jpg"
+FACE="${F}/image/valid/multi-face.webp"
+OCR="${F}/image/valid/ocr-chat.jpeg"
+OCRJP="${F}/image/valid/ocr-japanese.png"
+ISO="${F}/image/valid/portrait-isolated.png"
+HEAD="${F}/image/valid/portrait-headshot.heic"
+REDEYE="${F}/image/valid/red-eye.jpg"
+BARCODE="${F}/image/valid/barcode.avif"
 
 echo "[]" > /dev/null
-> "$RESULTS_FILE"
+if [ -e "$RESULTS_FILE" ]; then
+  log "Refusing to overwrite benchmark results: ${RESULTS_FILE}"
+  exit 2
+fi
+: > "$RESULTS_FILE"
 
 log "=== Starting benchmarks on ${SYSTEM} ==="
 TOKEN=$(get_token)
 log "Auth token obtained"
+BENCH_CONTAINER_ID=$(get_container_id) || {
+  log "Container '$CONTAINER_REF' does not resolve to one running Docker container"
+  exit 1
+}
+if [ -z "$BENCH_CONTAINER_ID" ]; then
+  log "Docker metrics disabled; pass a container argument or SNAPOTTER_BENCH_CONTAINER"
+fi
 
 log "=== TIER 1: Core Tool Benchmarks ==="
 
 for run in 1 2 3; do
   log "--- Run $run of 3 ---"
 
-  bench_tool "core" "image/resize" "small-r${run}" "$S" '{"width":100,"fit":"cover"}'
-  bench_tool "core" "image/resize" "large-r${run}" "$L" '{"width":800,"fit":"cover"}'
+  bench_tool "core" "image/resize" "small-r${run}" "$S" '{"width":100,"fit":"cover"}' '{"width":100}'
+  bench_tool "core" "image/resize" "large-r${run}" "$L" '{"width":800,"fit":"cover"}' '{"width":800}'
 
-  bench_tool "core" "image/crop" "small-r${run}" "$S" '{"left":10,"top":10,"width":100,"height":100}'
-  bench_tool "core" "image/crop" "large-r${run}" "$L" '{"left":10,"top":10,"width":100,"height":100}'
+  bench_tool "core" "image/crop" "small-r${run}" "$S" '{"left":10,"top":10,"width":100,"height":100}' '{"width":100,"height":100}'
+  bench_tool "core" "image/crop" "large-r${run}" "$L" '{"left":10,"top":10,"width":100,"height":100}' '{"width":100,"height":100}'
 
-  bench_tool "core" "image/rotate" "small-r${run}" "$S" '{"angle":90}'
-  bench_tool "core" "image/rotate" "large-r${run}" "$L" '{"angle":90}'
+  bench_tool "core" "image/rotate" "small-r${run}" "$S" '{"angle":90}' '{"width":150,"height":200}'
+  bench_tool "core" "image/rotate" "large-r${run}" "$L" '{"angle":90}' '{"width":3000,"height":4000}'
 
   bench_tool "core" "image/convert" "jpg-webp-small-r${run}" "$J" '{"format":"webp","quality":80}'
   bench_tool "core" "image/convert" "jpg-webp-large-r${run}" "$L" '{"format":"webp","quality":80}'
@@ -203,14 +214,14 @@ for run in 1 2 3; do
   bench_tool "core" "image/watermark-text" "small-r${run}" "$S" '{"text":"BENCHMARK","position":"tiled"}'
   bench_tool "core" "image/watermark-text" "large-r${run}" "$L" '{"text":"BENCHMARK","position":"tiled"}'
 
-  bench_tool_multifile "core" "image/compose" "small-r${run}" '{"blendMode":"overlay"}' "$S" "$J"
-  bench_tool_multifile "core" "image/compose" "large-r${run}" '{"blendMode":"overlay"}' "$L" "$P"
+  bench_tool_multifile "core" "image/compose" "small-r${run}" '{"blendMode":"overlay"}' '' "$S" "$J"
+  bench_tool_multifile "core" "image/compose" "large-r${run}" '{"blendMode":"overlay"}' '' "$L" "$P"
 
-  bench_tool_multifile "core" "image/collage" "4img-small-r${run}" '{"templateId":"4-grid"}' "$S" "$J" "${F}/test-50x50.webp" "${F}/test-100x100.svg"
-  bench_tool_multifile "core" "image/collage" "4img-large-r${run}" '{"templateId":"4-grid"}' "$L" "$P" "$BW" "${F}/content/watermark.jpg"
+  bench_tool_multifile "core" "image/collage" "4img-small-r${run}" '{"templateId":"4-grid"}' '' "$S" "$J" "${F}/image/valid/test-50x50.webp" "${F}/image/valid/test-100x100.svg"
+  bench_tool_multifile "core" "image/collage" "4img-large-r${run}" '{"templateId":"4-grid"}' '' "$L" "$P" "$BW" "${F}/image/valid/watermark.jpg"
 
-  bench_tool_multifile "core" "image/stitch" "3img-small-r${run}" '{"direction":"horizontal"}' "$S" "$J" "${F}/test-50x50.webp"
-  bench_tool_multifile "core" "image/stitch" "3img-large-r${run}" '{"direction":"horizontal"}' "$L" "$P" "$BW"
+  bench_tool_multifile "core" "image/stitch" "3img-small-r${run}" '{"direction":"horizontal"}' '' "$S" "$J" "${F}/image/valid/test-50x50.webp"
+  bench_tool_multifile "core" "image/stitch" "3img-large-r${run}" '{"direction":"horizontal"}' '' "$L" "$P" "$BW"
 
   bench_tool "core" "image/split" "small-r${run}" "$S" '{"columns":2,"rows":2}'
   bench_tool "core" "image/split" "large-r${run}" "$L" '{"columns":2,"rows":2}'
@@ -218,7 +229,7 @@ for run in 1 2 3; do
   bench_tool "core" "image/border" "small-r${run}" "$S" '{"borderWidth":20,"cornerRadius":10,"shadow":true}'
   bench_tool "core" "image/border" "large-r${run}" "$L" '{"borderWidth":20,"cornerRadius":10,"shadow":true}'
 
-  bench_tool "core" "image/svg-to-raster" "small-r${run}" "${F}/test-100x100.svg" '{"width":2000,"dpi":300}'
+  bench_tool "core" "image/svg-to-raster" "small-r${run}" "${F}/image/valid/test-100x100.svg" '{"width":2000,"dpi":300}' '{"width":2000}'
 
   bench_tool "core" "image/vectorize" "small-r${run}" "$S" '{"colorMode":"color"}'
   bench_tool "core" "image/vectorize" "large-r${run}" "$P" '{"colorMode":"color"}'
@@ -227,12 +238,12 @@ for run in 1 2 3; do
 
   bench_tool "core" "pdf/pdf-to-image" "r${run}" "$PDF" '{"format":"png","dpi":300}'
 
-  bench_tool "core" "image/optimize-for-web" "large-r${run}" "$L" '{"format":"webp","quality":80,"maxWidth":1920}'
+  bench_tool "core" "image/optimize-for-web" "large-r${run}" "$L" '{"format":"webp","quality":80,"maxWidth":1920}' '{"width":1920}'
 
   bench_tool "core" "image/favicon" "small-r${run}" "$S" ''
   bench_tool "core" "image/favicon" "large-r${run}" "$P" ''
 
-  bench_tool_multifile "core" "image/image-to-pdf" "3img-r${run}" '{"pageSize":"A4"}' "$S" "$J" "${F}/test-50x50.webp"
+  bench_tool_multifile "core" "image/image-to-pdf" "3img-r${run}" '{"pageSize":"A4"}' '{"pages":3}' "$S" "$J" "${F}/image/valid/test-50x50.webp"
 
   bench_tool "core" "image/replace-color" "small-r${run}" "$S" '{"sourceColor":"#FFFFFF","targetColor":"#FF0000","tolerance":30}'
   bench_tool "core" "image/replace-color" "large-r${run}" "$L" '{"sourceColor":"#FFFFFF","targetColor":"#FF0000","tolerance":30}'
@@ -240,10 +251,10 @@ for run in 1 2 3; do
   bench_tool "core" "image/info" "small-r${run}" "$S" ''
   bench_tool "core" "image/info" "large-r${run}" "$L" ''
 
-  bench_tool_multifile "core" "image/compare" "small-r${run}" '' "$S" "$S"
-  bench_tool_multifile "core" "image/compare" "large-r${run}" '' "$L" "$L"
+  bench_tool_multifile "core" "image/compare" "small-r${run}" '' '' "$S" "$S"
+  bench_tool_multifile "core" "image/compare" "large-r${run}" '' '' "$L" "$L"
 
-  bench_tool_multifile "core" "image/find-duplicates" "5img-r${run}" '{"threshold":5}' "$S" "$J" "${F}/test-50x50.webp" "$S" "$J"
+  bench_tool_multifile "core" "image/find-duplicates" "5img-r${run}" '{"threshold":5}' '' "$S" "$J" "${F}/image/valid/test-50x50.webp" "$S" "$J"
 
   bench_tool "core" "image/color-palette" "small-r${run}" "$P" ''
   bench_tool "core" "image/color-palette" "large-r${run}" "$L" ''
@@ -253,8 +264,8 @@ for run in 1 2 3; do
   bench_tool "core" "image/image-to-base64" "small-r${run}" "$S" '{"outputFormat":"webp"}'
   bench_tool "core" "image/image-to-base64" "large-r${run}" "$L" '{"outputFormat":"webp"}'
 
-  bench_tool "core" "image/content-aware-resize" "small-r${run}" "$S" '{"width":100}'
-  bench_tool "core" "image/content-aware-resize" "large-r${run}" "$L" '{"width":100}'
+  bench_tool "core" "image/content-aware-resize" "small-r${run}" "$S" '{"width":100}' '{"width":100}'
+  bench_tool "core" "image/content-aware-resize" "large-r${run}" "$L" '{"width":100}' '{"width":100}'
 
   bench_tool "core" "image/image-enhancement" "small-r${run}" "$S" '{"mode":"auto","intensity":50}'
   bench_tool "core" "image/image-enhancement" "large-r${run}" "$L" '{"mode":"auto","intensity":50}'
@@ -262,7 +273,7 @@ done
 
 log "=== TIER 5: Format Decode Benchmarks ==="
 
-for fmt_file in "${F}/formats/"*; do
+for fmt_file in "${F}/image/formats/"*; do
   fname=$(basename "$fmt_file")
   for run in 1 2 3; do
     bench_tool "format" "image/resize" "fmt-${fname}-r${run}" "$fmt_file" '{"width":200}'
@@ -274,32 +285,50 @@ log "=== TIER 6: Concurrent Load Benchmarks ==="
 for concurrency in 1 3 5 10 20; do
   log "Concurrency: ${concurrency}"
   local_results=$(mktemp)
+  pids=()
 
   for i in $(seq 1 "$concurrency"); do
     (
+      admission_file=$(mktemp)
+      artifact_file=$(mktemp)
       result=$(curl -s -X POST "${BASE_URL}/api/v1/tools/image/resize" \
         -H "Authorization: Bearer ${TOKEN}" \
         -F "file=@${L}" \
         -F 'settings={"width":800}' \
-        -o /dev/null -w "%{http_code} %{time_total}")
-      echo "$result"
+        -o "$admission_file" -w $'%{http_code}\t%{time_total}\t%{content_type}') \
+        || result=$'000\t0.000\tapplication/octet-stream'
+      IFS=$'\t' read -r http_code admission_time response_mime <<< "$result"
+      resolve_benchmark_response "$BASE_URL" "$TOKEN" "$http_code" "$response_mime" \
+        "$admission_file" "$artifact_file" "$admission_time" "$BENCH_JOB_TIMEOUT_MS" "" "" \
+        '{"width":800}' || true
+      printf '%s\t%s\t%s\n' "$BENCH_PASS" "$BENCH_COMPLETION_LATENCY_S" "$BENCH_ADMISSION_STATUS"
+      rm -f "$admission_file" "$artifact_file"
+      [ "$BENCH_PASS" = "true" ]
     ) >> "$local_results" &
+    pids+=("$!")
   done
-  wait
+  child_wait_failed=0
+  wait_for_benchmark_children "$concurrency" "$local_results" "${pids[@]}" || child_wait_failed=1
 
-  cid=$(get_container_id)
+  cid="$BENCH_CONTAINER_ID"
   mem_after=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
 
   times=()
   errors=0
   while IFS= read -r line; do
-    code=$(echo "$line" | awk '{print $1}')
-    t=$(echo "$line" | awk '{print $2}')
+    IFS=$'\t' read -r request_pass t code <<< "$line"
     times+=("$t")
-    if [ "$code" != "200" ]; then
+    if [ "$request_pass" != "true" ]; then
       errors=$((errors + 1))
     fi
   done < "$local_results"
+  BENCHMARK_FAILURES=$((BENCHMARK_FAILURES + errors))
+  if [ "$child_wait_failed" -ne 0 ]; then
+    BENCHMARK_FAILURES=$((BENCHMARK_FAILURES + BENCH_CHILD_EXIT_FAILURES))
+    if [ "$BENCH_OBSERVED_ROWS" -ne "$BENCH_EXPECTED_ROWS" ]; then
+      BENCHMARK_FAILURES=$((BENCHMARK_FAILURES + 1))
+    fi
+  fi
 
   sorted=$(printf '%s\n' "${times[@]}" | sort -n)
   count=${#times[@]}
@@ -309,9 +338,11 @@ for concurrency in 1 3 5 10 20; do
   p95=$(echo "$sorted" | sed -n "$((p95_idx + 1))p")
   max=$(echo "$sorted" | tail -1)
   min=$(echo "$sorted" | head -1)
+  completion_status="completed"
+  if [ "$errors" -gt 0 ]; then completion_status="failed"; fi
 
-  printf '{"system":"%s","tier":"concurrent","tool":"resize","variant":"c%d","concurrency":%d,"avg_s":%s,"p95_s":%s,"max_s":%s,"min_s":%s,"errors":%d,"mem_mb":%s}\n' \
-    "$SYSTEM" "$concurrency" "$concurrency" "$avg" "${p95:-0}" "${max:-0}" "${min:-0}" "$errors" "$mem_after" >> "$RESULTS_FILE"
+  printf '{"system":"%s","tier":"concurrent","tool":"resize","variant":"c%d","concurrency":%d,"avg_s":%s,"p95_s":%s,"max_s":%s,"min_s":%s,"errors":%d,"mem_mb":%s,"admission_status":"mixed","completion_status":"%s","completion_latency_s":%s,"output_mime":"mixed"}\n' \
+    "$SYSTEM" "$concurrency" "$concurrency" "$avg" "${p95:-0}" "${max:-0}" "${min:-0}" "$errors" "$mem_after" "$completion_status" "$avg" >> "$RESULTS_FILE"
 
   log "concurrent/c${concurrency}: avg=${avg}s p95=${p95}s max=${max}s errors=${errors} mem=${mem_after}MB"
   rm -f "$local_results"
@@ -319,11 +350,11 @@ done
 
 log "=== TIER 7: Sustained Load (50 sequential resizes) ==="
 
-cid=$(get_container_id)
+cid="$BENCH_CONTAINER_ID"
 mem_start=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
 
 for i in $(seq 1 50); do
-  bench_tool "sustained" "image/resize" "seq-${i}" "$L" '{"width":800}'
+  bench_tool "sustained" "image/resize" "seq-${i}" "$L" '{"width":800}' '{"width":800}'
 done
 
 mem_end=$(docker_mem_mb "$cid" 2>/dev/null || echo "0")
@@ -339,7 +370,7 @@ for batch_size in 3 5 10; do
   for i in $(seq 1 "$batch_size"); do
     files+=("$S")
   done
-  bench_tool_multifile "batch" "image/resize" "small-b${batch_size}" '{"width":100}' "${files[@]}"
+  bench_tool_multifile "batch" "image/resize" "small-b${batch_size}" '{"width":100}' '{"zipEach":{"width":100}}' "${files[@]}"
 done
 
 for batch_size in 3 5; do
@@ -347,15 +378,15 @@ for batch_size in 3 5; do
   for i in $(seq 1 "$batch_size"); do
     files+=("$L")
   done
-  bench_tool_multifile "batch" "image/resize" "large-b${batch_size}" '{"width":800}' "${files[@]}"
+  bench_tool_multifile "batch" "image/resize" "large-b${batch_size}" '{"width":800}' '{"zipEach":{"width":800}}' "${files[@]}"
 done
 
-bench_tool_multifile "batch" "image/convert" "mixed-5" '{"format":"webp","quality":80}' \
-  "$J" "$S" "${F}/test-50x50.webp" "${F}/test-200x150.heic" "${F}/formats/sample.avif"
+bench_tool_multifile "batch" "image/convert" "mixed-5" '{"format":"webp","quality":80}' '' \
+  "$J" "$S" "${F}/image/valid/test-50x50.webp" "${F}/image/valid/test-200x150.heic" "${F}/image/formats/sample.avif"
 
 log "=== TIER 4: Pipeline Benchmarks ==="
 
-bench_tool "pipeline" "image/resize" "1step" "$L" '{"width":800}'
+bench_tool "pipeline" "image/resize" "1step" "$L" '{"width":800}' '{"width":800}'
 
 log "=== Container Cold Start ==="
 # Record current time as baseline
@@ -364,3 +395,4 @@ log "Cold start measurement requires container restart - skipping in automated r
 log "=== ALL BENCHMARKS COMPLETE for ${SYSTEM} ==="
 log "Results in: ${RESULTS_FILE}"
 wc -l "$RESULTS_FILE" | awk '{print $1 " benchmark records written"}'
+benchmark_assert_success

@@ -203,8 +203,10 @@ test.describe("Keyboard Shortcuts - Work From Any Page", () => {
     await expect(page).toHaveURL("/image/resize");
   });
 
-  test("Cmd/Ctrl+Shift+D toggles theme from /fullscreen", async ({ loggedInPage: page }) => {
-    await page.goto("/fullscreen");
+  // /fullscreen stopped being a route in 2.0, so this case used to prove only
+  // that the shortcut works on the 404 page. /files is a real second surface.
+  test("Cmd/Ctrl+Shift+D toggles theme from /files", async ({ loggedInPage: page }) => {
+    await page.goto("/files");
 
     const hadDark = await page.evaluate(() => document.documentElement.classList.contains("dark"));
 
@@ -409,10 +411,16 @@ test.describe("Keyboard Shortcuts - Cmd+K Cross-Page", () => {
   test("Cmd/Ctrl+K focuses search on a tool page", async ({ loggedInPage: page }) => {
     await page.goto("/image/resize");
 
+    // Wait for the app shell (and its global shortcut listener) to hydrate
+    // before sending the shortcut.
+    await expect(page.getByRole("heading", { name: "Resize Image", level: 1 })).toBeVisible();
     await page.keyboard.press(`${MOD}+k`);
 
+    // Tool pages do not render a search box. The global shortcut navigates to
+    // the tools index, whose focus query is consumed after focusing the input.
     const searchInput = page.getByPlaceholder(/search/i).first();
     await expect(searchInput).toBeFocused();
+    await expect(page).toHaveURL("/");
   });
 
   test("Cmd/Ctrl+K focuses search on /automate", async ({ loggedInPage: page }) => {

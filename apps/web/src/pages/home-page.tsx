@@ -2,7 +2,7 @@ import type { Tool } from "@snapotter/shared";
 import { ANALYTICS_EVENTS, CATEGORIES, SECTIONS, TOOLS, toolSection } from "@snapotter/shared";
 import { ChevronDown, Plus, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
 import { ToolCard } from "@/components/common/tool-card.js";
 import { FeedbackDialog } from "@/components/feedback/feedback-dialog.js";
 import { AppLayout } from "@/components/layout/app-layout.js";
@@ -541,32 +541,34 @@ function AllTabContent({
 
         return (
           <section key={sec.id}>
-            <button
-              type="button"
-              onClick={() => toggleSection(sec.id)}
-              className="w-full flex items-center gap-2 py-2 mb-2 border-b border-border/40 group cursor-pointer"
-            >
-              {SectionIcon && (
-                <div
-                  className="p-1 rounded"
-                  style={{
-                    backgroundColor: `${sec.color}15`,
-                    color: sec.color,
-                  }}
-                >
-                  <SectionIcon className="h-4 w-4" />
-                </div>
-              )}
-              <span className="text-sm font-semibold text-foreground">{sec.name}</span>
-              <span className="text-xs text-muted-foreground">{totalCount}</span>
-              <div className="flex-1" />
-              <ChevronDown
-                className={cn(
-                  "h-4 w-4 text-muted-foreground transition-transform",
-                  isCollapsed && "-rotate-90",
+            <h2>
+              <button
+                type="button"
+                onClick={() => toggleSection(sec.id)}
+                className="w-full flex items-center gap-2 py-2 mb-2 border-b border-border/40 group cursor-pointer"
+              >
+                {SectionIcon && (
+                  <span
+                    className="p-1 rounded"
+                    style={{
+                      backgroundColor: `${sec.color}15`,
+                      color: sec.color,
+                    }}
+                  >
+                    <SectionIcon className="h-4 w-4" />
+                  </span>
                 )}
-              />
-            </button>
+                <span className="text-sm font-semibold text-foreground">{sec.name}</span>
+                <span className="text-xs text-muted-foreground">{totalCount}</span>
+                <span className="flex-1" />
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    isCollapsed && "-rotate-90",
+                  )}
+                />
+              </button>
+            </h2>
 
             {!isCollapsed && (
               <div className="space-y-5 ps-1">

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 
@@ -54,7 +54,7 @@ describe("MobileBottomNav", () => {
     const onClick = vi.fn();
     renderNav(onClick);
 
-    const settingsBtn = screen.getByText("Settings");
+    const settingsBtn = screen.getByTestId("open-settings");
     fireEvent.click(settingsBtn);
     expect(onClick).toHaveBeenCalledTimes(1);
   });

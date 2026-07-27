@@ -1,6 +1,6 @@
 import { ANALYTICS_EVENTS, en } from "@snapotter/shared";
 import { Component, type ErrorInfo, lazy, type ReactNode, Suspense, useEffect } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import { Toaster, toast } from "sonner";
 import { ConnectionMonitor } from "./components/common/connection-monitor";
 import { KeyboardShortcutProvider } from "./components/common/keyboard-shortcut-provider";
@@ -185,12 +185,14 @@ export function App() {
         <ConnectionMonitor />
         <Toaster position={isMobile ? "top-center" : "bottom-right"} />
         <BrowserRouter>
-          <a
-            href="#main-content"
-            className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-primary focus:text-primary-foreground focus:rounded-lg focus:text-sm focus:font-medium focus:shadow-lg"
-          >
-            {en.a11y.skipToContent}
-          </a>
+          <nav aria-label={en.a11y.skipToContent}>
+            <a
+              href="#main-content"
+              className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:start-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-primary focus:text-primary-foreground focus:rounded-lg focus:text-sm focus:font-medium focus:shadow-lg"
+            >
+              {en.a11y.skipToContent}
+            </a>
+          </nav>
           <RouteAnnouncer />
           <KeyboardShortcutProvider>
             <AuthGuard>

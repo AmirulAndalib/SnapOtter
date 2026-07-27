@@ -1,14 +1,23 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { eq } from "drizzle-orm";
+import type { FastifyInstance } from "fastify";
 import { expect } from "vitest";
 import { db, schema } from "../../apps/api/src/db/index.js";
 import { requestCancel } from "../../apps/api/src/jobs/cancel.js";
 import { waitForJob } from "../../apps/api/src/jobs/enqueue.js";
 import { getQueue } from "../../apps/api/src/jobs/queues.js";
 import type { Pool, ToolJobResult } from "../../apps/api/src/jobs/types.js";
+import { resolveToolPool } from "../../apps/api/src/lib/pool.js";
 
 const LIVE_DATABASE_STATUSES = new Set(["queued", "processing"]);
 const TERMINAL_QUEUE_STATES = new Set(["completed", "failed"]);
+
+export interface DownloadedJobArtifact {
+  buffer: Buffer;
+  contentType: string;
+  filename: string;
+  result: ToolJobResult;
+}
 
 export class AcceptedJobTimeoutError extends Error {
   constructor(jobId: string, timeoutMs: number) {
@@ -140,4 +149,106 @@ export async function waitForAcceptedJobOrCancel(
 
   await cancelAcceptedJobAndWait(jobId, pool);
   throw new AcceptedJobTimeoutError(jobId, timeoutMs);
+}
+
+async function downloadCompletedJobArtifact(
+  app: FastifyInstance,
+  token: string,
+  toolId: string,
+  jobId: string,
+  result: ToolJobResult,
+): Promise<DownloadedJobArtifact> {
+  if (result.outputRefs.length === 0) {
+    throw new Error(`${toolId}: completed job ${jobId} produced no downloadable artifact`);
+  }
+  if (!result.filename) throw new Error(`${toolId}: completed job ${jobId} has no filename`);
+
+  const download = await app.inject({
+    method: "GET",
+    url: `/api/v1/download/${encodeURIComponent(jobId)}/${encodeURIComponent(result.filename)}`,
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (download.statusCode !== 200) {
+    throw new Error(
+      `${toolId}: completed job ${jobId} artifact download returned ${download.statusCode}`,
+    );
+  }
+  if (download.rawPayload.length === 0) {
+    throw new Error(`${toolId}: completed job ${jobId} produced an empty artifact`);
+  }
+  if (result.processedSize <= 0 || download.rawPayload.length !== result.processedSize) {
+    throw new Error(
+      `${toolId}: completed job ${jobId} artifact size mismatch ` +
+        `(worker=${result.processedSize}, downloaded=${download.rawPayload.length})`,
+    );
+  }
+
+  const downloadedType = String(download.headers["content-type"] ?? "")
+    .split(";", 1)[0]
+    .toLowerCase();
+  const workerType = result.contentType.split(";", 1)[0].toLowerCase();
+  if (!downloadedType || downloadedType !== workerType) {
+    throw new Error(
+      `${toolId}: completed job ${jobId} artifact MIME mismatch ` +
+        `(worker=${workerType}, downloaded=${downloadedType || "missing"})`,
+    );
+  }
+
+  return {
+    buffer: Buffer.from(download.rawPayload),
+    contentType: downloadedType,
+    filename: result.filename,
+    result,
+  };
+}
+
+/**
+ * Wait for terminal success and return verified downloadable bytes. Installed
+ * capability tests use this when output semantics, not queue admission, are the
+ * release contract.
+ */
+export async function waitForDownloadedJobArtifact(
+  app: FastifyInstance,
+  token: string,
+  toolId: string,
+  jobId: string,
+  timeoutMs = 120_000,
+): Promise<DownloadedJobArtifact> {
+  const result = await waitForAcceptedJobOrCancel(jobId, resolveToolPool(toolId), timeoutMs);
+  return downloadCompletedJobArtifact(app, token, toolId, jobId, result);
+}
+
+/**
+ * Resolve a generated-matrix 202 through terminal success and prove that its
+ * worker result is observable as either a downloadable artifact or a
+ * non-empty structured payload. Admission alone is never coverage.
+ */
+export async function waitForGeneratedJobArtifact(
+  app: FastifyInstance,
+  token: string,
+  toolId: string,
+  jobId: string,
+  timeoutMs = 120_000,
+): Promise<ToolJobResult> {
+  const result = await waitForAcceptedJobOrCancel(jobId, resolveToolPool(toolId), timeoutMs);
+  if (result.outputRefs.length > 0) {
+    await downloadCompletedJobArtifact(app, token, toolId, jobId, result);
+    return result;
+  }
+
+  const payload = result.resultPayload;
+  if (!payload || Object.keys(payload).length === 0) {
+    throw new Error(`${toolId}: completed job ${jobId} produced no artifact or result payload`);
+  }
+  if (payload.success === false || payload.error !== undefined) {
+    // Carry the worker's own message. Without it every failure reads alike, and
+    // a caller cannot tell a product defect from a host with no ffmpeg.
+    const detail =
+      typeof payload.error === "string"
+        ? payload.error
+        : ((payload.error as { message?: unknown } | undefined)?.message ?? "");
+    const suffix = detail ? `: ${String(detail)}` : "";
+    throw new Error(`${toolId}: completed job ${jobId} returned a failure payload${suffix}`);
+  }
+  return result;
 }

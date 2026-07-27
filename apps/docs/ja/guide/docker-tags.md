@@ -1,8 +1,9 @@
 ---
 description: "SnapOtter の Docker イメージタグ、GPU ベンチマーク、バージョン固定、および AMD64 と ARM64 のマルチプラットフォーム対応。"
-i18n_output_hash: 977a3cec4702
-i18n_source_hash: fda322e78b4b
+i18n_source_hash: 566e20ca07fc
 i18n_provenance: human
+i18n_output_hash: fb77086402fb
+i18n_hash_version: 2
 ---
 
 # Docker イメージ {#docker-image}
@@ -93,13 +94,13 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # 非ローカル展開の場合はこれを変更します
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -140,9 +141,9 @@ Docker Compose 経由の NVIDIA CUDA アクセラレーションには、SnapOtt
 | タグ | 説明 |
 |-----|------------|
 | `latest` | 最新リリース |
-| `1.11.0` | 正確なバージョン |
-| `1.11` | 1.11.x の最新パッチ |
-| `1` | 1.x の最新マイナー |
+| `2.1.0` | 正確なバージョン |
+| `2.1` | 2.1.x の最新パッチ |
+| `2` | 2.x の最新マイナー |
 
 ## プラットフォーム {#platforms}
 

@@ -1,8 +1,9 @@
 ---
 description: "Schéma de base de données PostgreSQL, tables, migrations et procédures de sauvegarde pour SnapOtter."
-i18n_source_hash: 50d5d4f220cf
-i18n_provenance: human
-i18n_output_hash: 59270e5542d8
+i18n_source_hash: a68264552836
+i18n_provenance: machine
+i18n_output_hash: c87a358aae99
+i18n_hash_version: 2
 ---
 
 # Base de données {#database}
@@ -145,6 +146,17 @@ Journal des actions pertinentes pour la sécurité.
 | `details` | jsonb | Données spécifiques à l'action |
 | `createdAt` | timestamp | Date de l'action |
 
+### user_preferences {#user-preferences}
+
+État de l'interface propre à chaque utilisateur, indexé par nom de préférence. Alimente les outils épinglés de la page d'accueil via `PUT /api/v1/preferences`.
+
+| Colonne | Type | Notes |
+|---|---|---|
+| `userId` | text | FK vers users, suppression en cascade. Clé primaire avec `key` |
+| `key` | text | Nom de la préférence. Clé primaire avec `userId` |
+| `value` | jsonb | Contenu de la préférence |
+| `updatedAt` | timestamp | Dernière écriture |
+
 ## Migrations {#migrations}
 
 Drizzle gère les migrations de schéma. Les fichiers de migration se trouvent dans `apps/api/drizzle/`. Pendant le développement :
@@ -159,26 +171,34 @@ En production, les migrations en attente sont appliquées automatiquement au dé
 
 ## Sauvegarde et restauration {#backup-and-restore}
 
-La base de données relationnelle se trouve dans le volume `SnapOtter-pgdata` du conteneur Postgres, et non dans le volume `/data` de l'application.
+La base de données relationnelle réside dans le volume `SnapOtter-pgdata` du conteneur Postgres, et non dans le volume `/data` de l'application.
 
-**Option 1 : pg_dump (recommandé)**
-
-```bash
-# Dump the database while the stack is running
-docker exec SnapOtter-postgres pg_dump -U snapotter snapotter > backup.sql
-
-# Restore into a fresh database
-cat backup.sql | docker exec -i SnapOtter-postgres psql -U snapotter snapotter
-```
-
-**Option 2 : Instantané de volume**
+**Sauvegarde logique avec validation (recommandé)**
 
 ```bash
-# Stop the stack, then snapshot the pgdata volume
-docker compose down
-docker run --rm -v SnapOtter-pgdata:/data -v $(pwd)/backup:/backup \
-  alpine tar czf /backup/snapotter-pgdata.tar.gz -C /data .
+# Dump into PostgreSQL's portable custom archive format
+docker exec SnapOtter-postgres \
+  pg_dump --format=custom --no-owner -U snapotter snapotter > snapotter.dump
+test -s snapotter.dump
+docker exec -i SnapOtter-postgres pg_restore --list < snapotter.dump >/dev/null
+
+# Restore into a fresh/disposable target first and fail on the first SQL error
+docker exec -i SnapOtter-postgres \
+  pg_restore --exit-on-error --clean --if-exists --no-owner \
+  -U snapotter -d snapotter < snapotter.dump
 ```
+
+Ce vidage de base de données ne contient pas d'objets de bibliothèque enregistrés dans `/data/files` ni d'état BullMQ durable dans Redis. Sauvegardez et restaurez ceux-ci avec la procédure coordonnée dans [Sécurité et renforcement](/fr/guide/security#backup-and-recovery).
+
+**Instantané de volume froid**
+
+```bash
+# Stop every service first, then use your storage platform to snapshot the
+# PostgreSQL, app-data, and Redis volumes as one crash-consistent set.
+docker compose -f docker/docker-compose.yml stop
+```
+
+Ne copiez pas un répertoire de données PostgreSQL actif avec `tar`. Composez les noms de volumes de préfixes par projet, résolvez donc les ID de volume montés à partir de `docker inspect` ou de votre plate-forme de stockage plutôt que d'assumer l'étiquette littérale `SnapOtter-pgdata`.
 
 ### Migration depuis la 1.x (SQLite) {#migrating-from-1-x-sqlite}
 

@@ -1,10 +1,23 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { extname, join } from "node:path";
-import { apiToolPath, TOOL_BUNDLE_MAP, TOOLS } from "@snapotter/shared";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { apiToolPath, PYTHON_SIDECAR_TOOLS, TOOLS } from "@snapotter/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { fixtureDir } from "../../fixtures/index.js";
+import {
+  featureUnavailableDisposition,
+  GeneratedCaseAccounting,
+  isEngineUnavailableFailure,
+  isEngineUnavailableResponse,
+} from "../../helpers/generated-case-accounting.js";
+import {
+  buildGeneratedFixtureIndex,
+  type GeneratedFixture,
+  generatedFixtureDirectories,
+  selectFixturesForTool,
+} from "../../helpers/generated-fixtures.js";
+import { buildGeneratedMultipartFields } from "../../helpers/generated-multipart.js";
+import { findMissingGeneratedPythonPrerequisite } from "../../helpers/python-gate.js";
 import { defaultSettingsFor } from "../../helpers/tool-default-settings.js";
-import { cancelAcceptedJobAndWait } from "../settle-job.js";
+import { waitForGeneratedJobArtifact } from "../settle-job.js";
 import {
   buildTestApp,
   createMultipartPayload,
@@ -28,42 +41,8 @@ import {
  * tested with TWO copies of the same fixture to satisfy their minInputs.
  */
 
-// ── Fixture directories ──────────────────────────────────────────
-const VIDEO_FORMATS_DIR = fixtureDir.video.formats;
-const AUDIO_FORMATS_DIR = fixtureDir.audio.formats;
-const DOCUMENTS_DIR = fixtureDir.document.formats;
-const DATA_DIR = fixtureDir.data;
-
-// ── Build a global map: extension -> list of { dir, filename } ──
-interface FixtureFile {
-  dir: string;
-  filename: string;
-  ext: string;
-}
-
-function scanFixtures(dir: string): FixtureFile[] {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => !f.startsWith("."))
-    .map((f) => ({ dir, filename: f, ext: extname(f).toLowerCase() }));
-}
-
-const ALL_FIXTURES: FixtureFile[] = [
-  ...scanFixtures(VIDEO_FORMATS_DIR),
-  ...scanFixtures(AUDIO_FORMATS_DIR),
-  ...scanFixtures(DOCUMENTS_DIR),
-  ...scanFixtures(fixtureDir.document.valid),
-  ...scanFixtures(fixtureDir.document.edge),
-  ...scanFixtures(DATA_DIR),
-];
-
-// Group all fixtures by extension for look-up.
-const FIXTURES_BY_EXT = new Map<string, FixtureFile[]>();
-for (const f of ALL_FIXTURES) {
-  const list = FIXTURES_BY_EXT.get(f.ext);
-  if (list) list.push(f);
-  else FIXTURES_BY_EXT.set(f.ext, [f]);
-}
+const FIXTURES_BY_EXT = buildGeneratedFixtureIndex(generatedFixtureDirectories());
+const ALL_FIXTURES = [...FIXTURES_BY_EXT.values()].flat();
 
 // ── Tool classification helpers ──────────────────────────────────
 
@@ -94,7 +73,10 @@ const MULTI_INPUT_TOOLS = new Set([
   "compare",
 ]);
 
-const ALLOWED_STATUSES = new Set([200, 202, 400, 413, 415, 422, 501]);
+const ALLOWED_STATUSES = new Set([200, 202, 400, 413, 415, 422]);
+const REQUIRE_AI_FEATURES = process.env.REQUIRE_AI_FEATURES === "1";
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"]);
+const MIXED_INPUT_TOOLS = new Set(["burn-subtitles", "embed-subtitles", "replace-audio"]);
 
 // ── Select only non-image tools ──────────────────────────────────
 const NON_IMAGE_TOOLS = TOOLS.filter((t) => {
@@ -110,21 +92,11 @@ const NON_IMAGE_TOOLS = TOOLS.filter((t) => {
  * Returns every fixture whose extension is in the tool's accepted set,
  * so tools like merge-pdf get tested against both tiny.pdf and encrypted.pdf.
  */
-function fixturesForTool(tool: (typeof TOOLS)[number]): FixtureFile[] {
-  const accepted = new Set(tool.acceptedInputs.map((e) => e.toLowerCase()));
-  const matches: FixtureFile[] = [];
-  for (const ext of accepted) {
-    const list = FIXTURES_BY_EXT.get(ext);
-    if (list) matches.push(...list);
-  }
-  return matches;
-}
-
 /**
  * For multi-input tools, find a second fixture of the same extension
  * (e.g. tiny-a.csv and tiny-b.csv) or reuse the same file twice.
  */
-function secondFixtureForExt(ext: string, first: FixtureFile): FixtureFile {
+function secondFixtureForExt(ext: string, first: GeneratedFixture): GeneratedFixture {
   const alt = ALL_FIXTURES.find(
     (f) => f.ext === ext && (f.filename !== first.filename || f.dir !== first.dir),
   );
@@ -156,27 +128,45 @@ describe("multi-modality tool x format matrix", () => {
 
   for (const tool of NON_IMAGE_TOOLS) {
     const toolId = tool.id;
-    const fixtures = fixturesForTool(tool);
-    const isAiTool = toolId in TOOL_BUNDLE_MAP;
+    const selectedFixtures = selectFixturesForTool(FIXTURES_BY_EXT, tool);
+    const isAiTool = PYTHON_SIDECAR_TOOLS.includes(toolId);
     const isMultiInput = MULTI_INPUT_TOOLS.has(toolId);
 
     // Tools with empty acceptedInputs that aren't in the non-image set
     // (create-zip accepts anything) -- handle gracefully
-    if (fixtures.length === 0 && tool.acceptedInputs.length > 0) {
+    if (selectedFixtures.length === 0 && tool.acceptedInputs.length > 0) {
       it.skip(`${toolId} -- no matching fixtures for ${tool.acceptedInputs.join(", ")}`, () => {});
       continue;
     }
 
     // create-zip accepts [] (any file); give it a CSV fixture
-    const effectiveFixtures =
-      fixtures.length === 0 ? (FIXTURES_BY_EXT.get(".csv") ?? []).slice(0, 1) : fixtures;
+    const fallbackFixtures =
+      selectedFixtures.length === 0
+        ? (FIXTURES_BY_EXT.get(".csv") ?? []).slice(0, 1)
+        : selectedFixtures;
+    const effectiveFixtures = MIXED_INPUT_TOOLS.has(toolId)
+      ? fallbackFixtures.filter((fixture) => VIDEO_EXTENSIONS.has(fixture.ext))
+      : fallbackFixtures;
 
     if (effectiveFixtures.length === 0) {
       it.skip(`${toolId} -- no fixtures available`, () => {});
       continue;
     }
 
-    describe(toolId, () => {
+    const missingPython = findMissingGeneratedPythonPrerequisite(
+      toolId,
+      defaultSettingsFor(toolId),
+    );
+    if (missingPython) {
+      it.skip(`${toolId} -- ${missingPython}`, () => {});
+      continue;
+    }
+
+    describe.skipIf(isAiTool && !REQUIRE_AI_FEATURES)(toolId, () => {
+      const accounting = new GeneratedCaseAccounting(toolId, {
+        expectedAttempts: effectiveFixtures.length,
+      });
+
       for (const fixture of effectiveFixtures) {
         // 60s per-case timeout clears the 30s SYNC_WAIT_MS test floor (per-fork-env.ts):
         // under load a contended docs/media job can ride the full sync-wait window and
@@ -194,7 +184,32 @@ describe("multi-modality tool x format matrix", () => {
             content: Buffer | string;
           }> = [];
 
-          if (isMultiInput) {
+          if (MIXED_INPUT_TOOLS.has(toolId) || toolId === "sign-pdf") {
+            const companion = (extensions: readonly string[]) => {
+              for (const extension of extensions) {
+                const fixture = FIXTURES_BY_EXT.get(extension)?.[0];
+                if (fixture) {
+                  return {
+                    filename: fixture.filename,
+                    content: readFileSync(join(fixture.dir, fixture.filename)),
+                  };
+                }
+              }
+              throw new Error(`${toolId}: missing generated companion for ${extensions.join(",")}`);
+            };
+            fields.push(
+              ...buildGeneratedMultipartFields({
+                toolId,
+                primary: { filename: fixture.filename, content },
+                settings,
+                companions: {
+                  image: companion([".png", ".jpg"]),
+                  audio: companion([".wav", ".mp3"]),
+                  subtitle: companion([".srt", ".vtt"]),
+                },
+              }),
+            );
+          } else if (isMultiInput) {
             const second = secondFixtureForExt(fixture.ext, fixture);
             const secondContent = readFileSync(join(second.dir, second.filename));
             fields.push(
@@ -220,7 +235,9 @@ describe("multi-modality tool x format matrix", () => {
             });
           }
 
-          fields.push({ name: "settings", content: JSON.stringify(settings) });
+          if (!MIXED_INPUT_TOOLS.has(toolId) && toolId !== "sign-pdf") {
+            fields.push({ name: "settings", content: JSON.stringify(settings) });
+          }
 
           const { body, contentType } = createMultipartPayload(fields);
           const res = await testApp.app.inject({
@@ -229,15 +246,37 @@ describe("multi-modality tool x format matrix", () => {
             headers: { authorization: `Bearer ${adminToken}`, "content-type": contentType },
             body,
           });
+          accounting.attempt();
 
-          // Custom-route tools may 404 on the standard path; covered elsewhere.
-          if (res.statusCode === 404) return;
+          if (res.statusCode === 501 && isAiTool) {
+            const payload = JSON.parse(res.body) as { code?: unknown };
+            const disposition = featureUnavailableDisposition({
+              toolId,
+              statusCode: res.statusCode,
+              code: payload.code,
+              requireAiFeatures: REQUIRE_AI_FEATURES,
+            });
+            if (disposition === "skip") {
+              accounting.skip(
+                "optional-feature",
+                `${String(payload.code)} for ${fixture.filename}`,
+              );
+              return;
+            }
+          }
+
+          // A host without ffmpeg cannot run media tools at all. That is the
+          // operator's container, not a product failure, and CI shards ship
+          // without ffmpeg by design, so record it and move on.
+          if (isEngineUnavailableResponse(res.statusCode, res.body)) {
+            accounting.skip("missing-host-binary", `engine unavailable for ${fixture.filename}`);
+            return;
+          }
 
           expect(
             ALLOWED_STATUSES.has(res.statusCode),
             `${toolId} x ${fixture.filename}: status ${res.statusCode}: ${res.body.slice(0, 300)}`,
           ).toBe(true);
-
           // ── Validate response shape by status ──
           if (res.statusCode === 200) {
             const resType = (res.headers["content-type"]?.toString() ?? "").split(";")[0];
@@ -266,6 +305,7 @@ describe("multi-modality tool x format matrix", () => {
               ).toBe("PK");
             }
             // Other content types (audio/*, video/*, application/pdf, text/*) are valid
+            accounting.accept();
           }
 
           if (res.statusCode === 202) {
@@ -277,24 +317,26 @@ describe("multi-modality tool x format matrix", () => {
             ).toBeDefined();
             expect(typeof payload.jobId).toBe("string");
 
-            // The generic matrix verifies acceptance, not OCR execution. If an
-            // optional OCR runtime happens to be installed locally, release its
-            // long-running job immediately rather than leaking it into teardown.
-            if (toolId === "ocr-pdf") {
-              await cancelAcceptedJobAndWait(payload.jobId as string, "ai");
+            try {
+              await waitForGeneratedJobArtifact(
+                testApp.app,
+                adminToken,
+                toolId,
+                payload.jobId as string,
+              );
+              accounting.accept();
+            } catch (error) {
+              if (!isEngineUnavailableFailure(error)) throw error;
+              accounting.skip("missing-host-binary", `engine unavailable for ${fixture.filename}`);
             }
           }
-
-          if (res.statusCode === 501) {
-            // AI bundle not installed -- validate the error shape
-            const payload = JSON.parse(res.body) as Record<string, unknown>;
-            expect(
-              payload.error || payload.code,
-              `${toolId} x ${fixture.filename}: 501 without error/code`,
-            ).toBeDefined();
-          }
-        }, 60_000);
+          if (res.statusCode !== 200 && res.statusCode !== 202) accounting.reject();
+        }, 180_000);
       }
+
+      it("conserves generated case accounting", () => {
+        accounting.assertCovered();
+      });
     });
   }
 });

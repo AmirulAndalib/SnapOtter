@@ -1,10 +1,28 @@
-import { TOOLS } from "@snapotter/shared";
+import { PYTHON_SIDECAR_TOOLS, TOOLS } from "@snapotter/shared";
 import fc from "fast-check";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { z } from "zod";
 import { ZodFastCheck } from "zod-fast-check";
 import { getToolConfig } from "../../../apps/api/src/routes/tool-factory.js";
-import { fixtures, readFixture } from "../../fixtures/index.js";
+import {
+  fuzzBudgetFor,
+  parseFuzzConfig,
+  runFuzzCaseWithWatchdog,
+} from "../../helpers/fuzz-policy.js";
+import { GeneratedCaseAccounting } from "../../helpers/generated-case-accounting.js";
+import {
+  buildGeneratedFixtureIndex,
+  generatedFixtureDirectories,
+  selectFixturesForTool,
+} from "../../helpers/generated-fixtures.js";
+import { findMissingGeneratedPythonPrerequisite } from "../../helpers/python-gate.js";
+import {
+  buildGeneratedProcessInputs,
+  findMissingGeneratedPrerequisite,
+  isExpectedGeneratedRejection,
+  runGeneratedTool,
+} from "../../helpers/run-generated-tool.js";
+import { defaultSettingsFor } from "../../helpers/tool-default-settings.js";
 import { collectRegexStringSchemas } from "../../helpers/zod-pict.js";
 import { buildTestApp, type TestApp } from "../test-server.js";
 
@@ -17,17 +35,22 @@ import { buildTestApp, type TestApp } from "../test-server.js";
  * Nightly-only (FUZZ=1); FUZZ_RUNS controls depth (default 25).
  */
 const FUZZ = !!process.env.FUZZ;
-const NUM_RUNS = Number(process.env.FUZZ_RUNS ?? 25);
-const CRASH_PATTERN =
-  /TypeError|undefined is not|null is not|Cannot read propert|is not a function/i;
+const FUZZ_CONFIG = parseFuzzConfig(FUZZ ? process.env : {});
+const REQUIRE_AI_FEATURES = process.env.REQUIRE_AI_FEATURES === "1";
+const FIXTURE_INDEX = buildGeneratedFixtureIndex(generatedFixtureDirectories());
 
 describe.skipIf(!FUZZ)("settings fuzz (property-based)", () => {
   let testApp: TestApp;
-  let inputPng: Buffer;
 
   beforeAll(async () => {
+    console.info(
+      `[fuzz-config] runs=${FUZZ_CONFIG.runs} seed=${FUZZ_CONFIG.seed} ` +
+        `seedSource=${FUZZ_CONFIG.seedSource}`,
+    );
+    if (FUZZ_CONFIG.seedSource === "FC_SEED") {
+      console.warn("[fuzz-config] FC_SEED is deprecated; use FUZZ_SEED instead");
+    }
     testApp = await buildTestApp();
-    inputPng = readFixture(fixtures.image.base.png200);
   }, 30_000);
 
   afterAll(async () => {
@@ -38,9 +61,59 @@ describe.skipIf(!FUZZ)("settings fuzz (property-based)", () => {
   // are looked up inside the test body; registry-exempt tools no-op here.
   for (const tool of TOOLS) {
     const toolId = tool.id;
-    it(`${toolId} never crashes on schema-valid settings`, async () => {
+    const budget = fuzzBudgetFor(tool, FUZZ_CONFIG.runs);
+    it(`${toolId} never crashes on schema-valid settings`, {
+      timeout: budget.targetTimeoutMs,
+    }, async (context) => {
+      if (PYTHON_SIDECAR_TOOLS.includes(toolId) && !REQUIRE_AI_FEATURES) {
+        return context.skip(
+          `${toolId}: optional AI prerequisite absent; set REQUIRE_AI_FEATURES=1 after install`,
+        );
+      }
       const config = getToolConfig(toolId);
-      if (!config) return;
+      if (!config) return context.skip(`${toolId}: no standard tool config`);
+      const missingPython = findMissingGeneratedPythonPrerequisite(toolId, undefined);
+      if (missingPython) return context.skip(`${toolId}: ${missingPython}`);
+      const missingPrerequisite = await findMissingGeneratedPrerequisite(toolId);
+      if (missingPrerequisite) return context.skip(`${toolId}: ${missingPrerequisite}`);
+
+      const fixtures = selectFixturesForTool(FIXTURE_INDEX, tool);
+      if (fixtures.length === 0) {
+        return context.skip(`${toolId}: no compatible generated fixture`);
+      }
+      const inputs = await buildGeneratedProcessInputs(fixtures, config, tool.modality);
+      const accounting = new GeneratedCaseAccounting(toolId, {
+        expectedAttempts: FUZZ_CONFIG.runs + 1,
+      });
+
+      // Every fuzz target gets one deterministic, user-realistic smoke case.
+      // This distinguishes a valid schema whose random values are all rejected
+      // by fixture-dependent semantic checks from a tool that cannot succeed.
+      const baseline = config.settingsSchema.safeParse(defaultSettingsFor(toolId));
+      if (!baseline.success) {
+        throw new Error(`${toolId}: default settings do not satisfy the registered schema`);
+      }
+      accounting.attempt();
+      const missingBaselinePython = findMissingGeneratedPythonPrerequisite(toolId, baseline.data);
+      if (missingBaselinePython) {
+        accounting.skip("optional-feature", missingBaselinePython);
+      } else {
+        const baselineOutput = await runFuzzCaseWithWatchdog(
+          {
+            toolId,
+            seed: FUZZ_CONFIG.seed,
+            run: 0,
+            settings: baseline.data,
+            timeoutMs: budget.caseTimeoutMs,
+          },
+          (signal) => runGeneratedTool(config, inputs, baseline.data, signal),
+        );
+        expect(
+          baselineOutput.length,
+          `${toolId} produced empty output for defaults`,
+        ).toBeGreaterThan(0);
+        accounting.accept();
+      }
 
       let arbitrary: fc.Arbitrary<unknown>;
       try {
@@ -56,30 +129,48 @@ describe.skipIf(!FUZZ)("settings fuzz (property-based)", () => {
           );
         }
         arbitrary = zfc.inputOf(config.settingsSchema as z.ZodTypeAny);
-      } catch {
+      } catch (error) {
         // Schema uses constructs zod-fast-check cannot derive (refinements over
         // multiple fields, transforms); the pairwise matrix still covers it.
-        return;
+        const reason = error instanceof Error ? error.message : String(error);
+        return context.skip(`${toolId}: schema generator prerequisite unavailable: ${reason}`);
       }
 
       try {
+        let run = 0;
         await fc.assert(
           fc.asyncProperty(arbitrary, async (settings) => {
             const parsed = config.settingsSchema.safeParse(settings);
             fc.pre(parsed.success);
+            run += 1;
+            accounting.attempt();
+            const missingCasePython = findMissingGeneratedPythonPrerequisite(toolId, parsed.data);
+            if (missingCasePython) {
+              accounting.skip("optional-feature", missingCasePython);
+              return;
+            }
             try {
-              await config.process(inputPng, parsed.data, "test-200x150.png");
-            } catch (err) {
-              if (!(err instanceof Error)) {
-                throw new Error(`${toolId} threw a non-Error: ${String(err)}`);
-              }
-              if (CRASH_PATTERN.test(err.message)) {
-                throw new Error(`${toolId} crashed on ${JSON.stringify(settings)}: ${err.message}`);
-              }
-              // Clean operational failure: acceptable.
+              const result = await runFuzzCaseWithWatchdog(
+                {
+                  toolId,
+                  seed: FUZZ_CONFIG.seed,
+                  run,
+                  settings: parsed.data,
+                  timeoutMs: budget.caseTimeoutMs,
+                },
+                (signal) => runGeneratedTool(config, inputs, parsed.data, signal),
+              );
+              expect(
+                result.length,
+                `${toolId} produced empty output for ${JSON.stringify(settings)}`,
+              ).toBeGreaterThan(0);
+              accounting.accept();
+            } catch (error) {
+              if (!isExpectedGeneratedRejection(error)) throw error;
+              accounting.reject();
             }
           }),
-          { numRuns: NUM_RUNS, interruptAfterTimeLimit: 180_000 },
+          { numRuns: FUZZ_CONFIG.runs, seed: FUZZ_CONFIG.seed },
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -88,10 +179,12 @@ describe.skipIf(!FUZZ)("settings fuzz (property-based)", () => {
         // pairwise matrix still covers it. Real property failures rethrow.
         // fast-check v4 phrases this as "too many pre-condition failures"
         // (hyphenated), so match both spellings.
-        if (/Unable to generate valid values|pre-?condition/i.test(message)) return;
+        if (/Unable to generate valid values|pre-?condition/i.test(message)) {
+          return context.skip(`${toolId}: generator produced no schema-valid cases: ${message}`);
+        }
         throw err;
       }
-      expect(true).toBe(true);
-    }, 240_000);
+      expect(accounting.assertCovered().accepted).toBeGreaterThan(0);
+    });
   }
 });

@@ -1,8 +1,9 @@
 ---
 description: "ثبّت SnapOtter باستخدام Docker بأمر واحد. يشمل إعداد Docker Compose، والبناء من المصدر، ونظرة عامة كاملة على الميزات."
-i18n_output_hash: 83a518bd23e4
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: e8421f9b57be
+i18n_hash_version: 2
 ---
 
 # البدء {#getting-started}
@@ -17,7 +18,7 @@ i18n_provenance: human
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-تشغّل هذه الحاوية الواحدة كل ما تحتاجه: مع عدم تعيين `DATABASE_URL`، تبدأ PostgreSQL و Redis الخاصين بها على واجهة الاسترجاع (الوضع المدمج) وتحتفظ بجميع البيانات في وحدة التخزين `SnapOtter-data`. إنها أسرع طريقة لتجربة SnapOtter أو الاستضافة الذاتية على مختبر منزلي. لبيئة الإنتاج، شغّل حزمة [Docker Compose](#docker-compose) أدناه، التي تبقي PostgreSQL و Redis في حاوياتهما الخاصة. يعمل الوضع المدمج كـ root (الافتراضي) ويتوقف تلقائيًا بمجرد تعيينك لـ `DATABASE_URL`.
+تعمل هذه الحاوية الفردية على تشغيل كل ما تحتاجه: بدون تعيين `DATABASE_URL`، فإنها تبدأ تشغيل PostgreSQL وRedis الخاصين بها على واجهة الاسترجاع (الوضع المضمن) وتحتفظ بجميع البيانات في وحدة تخزين `SnapOtter-data`. إنها أسرع طريقة لتجربة SnapOtter أو الاستضافة الذاتية على معمل منزلي. للإنتاج، استخدم [مكدس Docker Compose الأساسي](#docker-compose)، الذي يحتفظ بـ PostgreSQL وRedis في حاوياتهما الخاصة. يعمل الوضع المضمن كجذر (الافتراضي) ويتم إيقاف تشغيله تلقائيًا بمجرد ضبط `DATABASE_URL`.
 
 هل تثبّت على Raspberry Pi أو حاسوب محمول قديم أو VPS صغير؟ راجع [التشغيل على موارد محدودة](/ar/guide/low-resource) للاطلاع على شرح تطبيقي مضبوط وما يمكن توقعه من العتاد المحدود.
 
@@ -40,7 +41,7 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/sn
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-يتطلب [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). يرجع إلى المعالج المركزي تلقائيًا عندما يكون CUDA غير متاح. تسريع iGPU من Intel/AMD عبر VA-API أو Quick Sync أو OpenCL غير مدعوم لاستدلال الذكاء الاصطناعي حاليًا. راجع [وسوم Docker](/ar/guide/docker-tags) لاختبارات الأداء.
+يتطلب [مجموعة أدوات حاوية NVIDIA](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). يعود إلى وحدة المعالجة المركزية تلقائيًا عندما لا يكون CUDA متاحًا. تسريع Intel/AMD iGPU من خلال VA-API أو Quick Sync أو OpenCL غير مدعوم لاستدلال الذكاء الاصطناعي اليوم. راجع [علامات Docker](/ar/guide/docker-tags) لمعرفة المعايير. إذا كانت أدوات الذكاء الاصطناعي تعمل على وحدة المعالجة المركزية بالرغم من `--gpus all`، فراجع [التحقق من تسريع وحدة معالجة الرسومات](/ar/guide/deployment#verify-gpu-acceleration).
 :::
 
 ::: details متوفر أيضًا على GHCR
@@ -51,67 +52,33 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 ينشر كلا السجلين نفس الصورة عند كل إصدار.
 :::
 
-## Docker Compose {#docker-compose}
+## دوكر يؤلف {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+استخدم ملف الإنتاج الذي تمت صيانته واختباره مع كل إصدار بدلاً من نسخ مثال الإنشاء المختصر من هذه الصفحة:
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-راجع [التهيئة](/ar/guide/configuration) لجميع متغيرات البيئة.
+يتضمن [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) الأساسي جميع وحدات تخزين وقت التشغيل الأربعة، وفحوصات السلامة، وحدود الموارد، وتكوين Redis الدائم، وصور قاعدة البيانات/ذاكرة التخزين المؤقت المثبتة، وتصلب الحاوية الحالية. قم بتغيير كلمة مرور المسؤول الافتراضية مباشرة بعد تسجيل الدخول الأول. للحصول على نشر قابل للتكرار، قم بتثبيت صورة تطبيق SnapOtter على علامة الإصدار أو الملخص الذي قمت بالتحقق منه بدلاً من اتباع `latest`.
+
+راجع [التكوين](/ar/guide/configuration) للتعرف على كافة متغيرات البيئة و[الأمان والصلابة](/ar/guide/security) للتعرف على الأسرار وسياسة الشبكة وإرشادات النسخ الاحتياطي.
 
 ## البناء من المصدر {#build-from-source}
 
-**المتطلبات المسبقة:** Node.js 22+، و pnpm 9+، و Docker (لـ Postgres + Redis)، و Python 3.10+ (لميزات الذكاء الاصطناعي)، و Git.
+**المتطلبات المسبقة:** Node.js 22.22+، و pnpm 9+، و Docker (لـ Postgres + Redis)، و Python 3.11+ (لميزات الذكاء الاصطناعي)، و Git.
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- الواجهة الأمامية: [http://localhost:1349](http://localhost:1349)
+- الواجهة الأمامية: [http://localhost:1351](http://localhost:1351)
 - الواجهة الخلفية: [http://localhost:13490](http://localhost:13490)
 
 ## ما يمكنك فعله {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | الوسيط | العدد | أمثلة على الأدوات |
 |----------|-------|---------------|
-| **الصور** | 105 | تغيير الحجم، والاقتصاص، والضغط، والتحويل، وإزالة الخلفية، وتكبير الدقة، و OCR، والعلامة المائية، والملصقة، والتلوين، وأدوات GIF، وإعدادات التنسيق المسبقة |
+| **الصور** | 107 | تغيير الحجم، والاقتصاص، والضغط، والتحويل، وإزالة الخلفية، وتكبير الدقة، و OCR، والعلامة المائية، والملصقة، والتلوين، وأدوات GIF، وإعدادات التنسيق المسبقة |
 | **الفيديو** | 57 | القص، والاقتصاص، والضغط، والتحويل، والدمج، واستخراج الصوت، والترجمات التلقائية، والفيديو إلى GIF، وتغيير الحجم، والتثبيت، وإعدادات التنسيق المسبقة |
 | **الصوت** | 27 | القص، والدمج، والتحويل، والتسوية، وتقليل الضوضاء، والنسخ النصي، وتحويل درجة النغمة، والتلاشي، وصانع نغمات الرنين، وإعدادات التنسيق المسبقة |
-| **PDF / المستندات** | 42 | الدمج، والتقسيم، والضغط، و OCR، والعلامة المائية، والتنقيح، و Word إلى PDF، و Excel إلى PDF، والتدوير، والحماية، والإصلاح |
-| **الملفات** | 10 | CSV إلى JSON، و JSON إلى XML، ودمج ملفات CSV، وتقسيم CSV، وإنشاء ZIP، واستخراج ZIP، وصانع المخططات، و YAML/JSON |
+| **PDF / المستندات** | 29 | الدمج، والتقسيم، والضغط، و OCR، والعلامة المائية، والتنقيح، و Word إلى PDF، و Excel إلى PDF، والتدوير، والحماية، والإصلاح |
+| **الملفات** | 23 | CSV إلى JSON، و JSON إلى XML، ودمج ملفات CSV، وتقسيم CSV، وإنشاء ZIP، واستخراج ZIP، وصانع المخططات، و YAML/JSON |
 
 ### خطوط الأنابيب {#pipelines}
 

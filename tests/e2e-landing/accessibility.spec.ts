@@ -84,9 +84,20 @@ test.describe("Keyboard Navigation", () => {
 });
 
 test.describe("Image Accessibility", () => {
-  test("navbar logo has alt text", async ({ page }) => {
+  // The logo sits inside a link that already carries the visible word
+  // SnapOtter, so alt text on it made a screen reader say the name twice
+  // (axe image-redundant-alt). It is marked decorative instead, and the link
+  // itself is what has to carry the accessible name.
+  test("navbar logo is decorative and its link is still named", async ({ page }) => {
     await page.goto("/");
-    const logo = page.locator('nav img[alt="SnapOtter"]');
+    const logo = page.locator("nav img[src='/logo.png']");
     await expect(logo).toBeVisible();
+    await expect(logo).toHaveAttribute("alt", "");
+    // `has` resolves relative to each candidate, so handing it the absolute
+    // `nav img[...]` locator asked for a <nav> inside the <a> and matched
+    // nothing, which made this assertion vacuous. Scope it to the image.
+    await expect(
+      page.locator("nav a").filter({ has: page.locator("img[src='/logo.png']") }),
+    ).toHaveAccessibleName(/SnapOtter/);
   });
 });

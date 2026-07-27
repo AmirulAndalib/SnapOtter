@@ -35,8 +35,10 @@ export const SVG_FRAMES = new Set([
   "browser-dark",
 ]);
 
+const hexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+
 export const gradientStopSchema = z.object({
-  color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  color: hexColorSchema,
   position: z.number().min(0).max(100),
 });
 
@@ -44,7 +46,7 @@ export const settingsSchema = z.object({
   backgroundType: z
     .enum(["solid", "linear-gradient", "radial-gradient", "image", "transparent"])
     .default("linear-gradient"),
-  backgroundColor: z.string().default("#667eea"),
+  backgroundColor: hexColorSchema.default("#667eea"),
   gradientStops: z
     .array(gradientStopSchema)
     .min(2)
@@ -53,13 +55,13 @@ export const settingsSchema = z.object({
       { color: "#764ba2", position: 100 },
     ]),
   gradientAngle: z.number().min(0).max(360).default(135),
-  padding: z.number().min(0).max(256).default(64),
-  borderRadius: z.number().min(0).max(64).default(12),
+  padding: z.number().int().min(0).max(256).default(64),
+  borderRadius: z.number().int().min(0).max(64).default(12),
   shadowPreset: z.enum(["none", "subtle", "medium", "dramatic", "custom"]).default("subtle"),
   shadowBlur: z.number().min(0).max(100).default(20),
-  shadowOffsetX: z.number().min(-50).max(50).default(0),
-  shadowOffsetY: z.number().min(-50).max(50).default(10),
-  shadowColor: z.string().default("#000000"),
+  shadowOffsetX: z.number().int().min(-50).max(50).default(0),
+  shadowOffsetY: z.number().int().min(-50).max(50).default(10),
+  shadowColor: hexColorSchema.default("#000000"),
   shadowOpacity: z.number().min(0).max(100).default(30),
   frame: z
     .enum([

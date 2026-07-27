@@ -1,9 +1,15 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { apiToolPath } from "@snapotter/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fixtures, readFixture } from "../../fixtures/index.js";
-import { cancelAcceptedJobAndWait } from "../settle-job.js";
+import {
+  featureUnavailableDisposition,
+  GeneratedCaseAccounting,
+  isEngineUnavailableFailure,
+  isEngineUnavailableResponse,
+} from "../../helpers/generated-case-accounting.js";
+import { buildGeneratedMultipartFields } from "../../helpers/generated-multipart.js";
+import { findMissingGeneratedPythonPrerequisite } from "../../helpers/python-gate.js";
+import { waitForGeneratedJobArtifact } from "../settle-job.js";
 import {
   buildTestApp,
   createMultipartPayload,
@@ -15,22 +21,18 @@ import {
 // Fixtures -- one canonical file per modality
 // ---------------------------------------------------------------------------
 const IMG = () => readFixture(fixtures.image.base.png200);
+const SVG = () => readFixture(fixtures.image.base.svg100);
 const VID = () => readFixture(fixtures.video.tiny("mp4"));
 const AUD = () => readFixture(fixtures.audio.tiny("mp3"));
 const PDF = () => readFixture(fixtures.document.pdf3);
 const CSV = () => readFixture(fixtures.data.csv);
 const JSON_F = () => readFixture(fixtures.data.json);
-const XML_F = () => readFixture(fixtures.data.xml);
-const YAML_F = () => readFixture(fixtures.data.yaml);
 const DOCX = () => readFixture(fixtures.document.tiny("docx"));
 const XLSX = () => readFixture(fixtures.document.tiny("xlsx"));
 const PPTX = () => readFixture(fixtures.document.tiny("pptx"));
-const HTML = () => readFixture(fixtures.document.tiny("html"));
-const MD = () => readFixture(fixtures.document.tiny("md"));
 const EPUB = () => readFixture(fixtures.document.tiny("epub"));
 const GIF = () => readFixture(fixtures.image.animated.gif);
 const SRT = () => readFixture(fixtures.video.subs.srt);
-const WAV = () => readFixture(fixtures.audio.tiny("wav"));
 
 // ---------------------------------------------------------------------------
 // Fixture + filename resolver per tool modality
@@ -71,7 +73,7 @@ const TOOL_FIXTURE: Record<string, FixtureSpec> = {
   split: IMAGE_FIX,
   "image-to-pdf": IMAGE_FIX,
   "image-to-base64": IMAGE_FIX,
-  "svg-to-raster": IMAGE_FIX,
+  "svg-to-raster": { buffer: SVG, filename: "test.svg" },
   "smart-crop": IMAGE_FIX,
   "content-aware-resize": IMAGE_FIX,
   // Video tools
@@ -1102,8 +1104,8 @@ const SETTINGS_VARIATIONS: Record<string, Variation[]> = {
 
 // ---------------------------------------------------------------------------
 // Tools that are AI-gated (need an installed bundle). These tools will
-// return 501 FEATURE_NOT_INSTALLED which we accept as a valid non-crash
-// response. We still exercise the settings validation path.
+// return 501 FEATURE_NOT_INSTALLED when their prerequisite is absent.
+// Default campaigns report that as a skip; installed-feature campaigns fail.
 // ---------------------------------------------------------------------------
 const AI_GATED_TOOLS = new Set([
   "noise-removal",
@@ -1130,12 +1132,10 @@ const AI_GATED_TOOLS = new Set([
   "vectorize",
 ]);
 
-// Tools that need a second input (subtitle or second image)
-const MULTI_INPUT_TOOLS = new Set(["burn-subtitles", "embed-subtitles"]);
-
 // Accepted status codes: 200 = success, 202 = async, 400 = bad settings,
-// 422 = processing failure, 501 = feature not installed, 415 = wrong type
-const ACCEPTED_STATUSES = new Set([200, 202, 400, 415, 422, 501]);
+// 422 = processing failure, 415 = wrong type
+const ACCEPTED_STATUSES = new Set([200, 202, 400, 415, 422]);
+const REQUIRE_AI_FEATURES = process.env.REQUIRE_AI_FEATURES === "1";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test suite
@@ -1155,44 +1155,42 @@ describe("settings variation matrix", () => {
   }, 10_000);
 
   for (const [toolId, variations] of Object.entries(SETTINGS_VARIATIONS)) {
-    describe(toolId, () => {
+    const runnableVariations = variations.filter(
+      ({ settings }) => !findMissingGeneratedPythonPrerequisite(toolId, settings),
+    );
+    const allPythonVariationsUnavailable = variations.length > 0 && runnableVariations.length === 0;
+    const missingPython = allPythonVariationsUnavailable
+      ? findMissingGeneratedPythonPrerequisite(toolId, variations[0]?.settings)
+      : undefined;
+    const skipTool =
+      (AI_GATED_TOOLS.has(toolId) && !REQUIRE_AI_FEATURES) || allPythonVariationsUnavailable;
+
+    describe.skipIf(skipTool)(missingPython ? `${toolId} -- ${missingPython}` : toolId, () => {
+      const accounting = new GeneratedCaseAccounting(toolId, {
+        expectedAttempts: runnableVariations.length,
+      });
+
       for (const { label, settings } of variations) {
+        const missingPython = findMissingGeneratedPythonPrerequisite(toolId, settings);
+        if (missingPython) {
+          it.skip(`${label} -- ${missingPython}`, () => {});
+          continue;
+        }
+
         it(label, async () => {
           const fixture = TOOL_FIXTURE[toolId];
-          if (!fixture) {
-            // No fixture mapped for this tool; skip gracefully
-            return;
-          }
+          expect(fixture, `${toolId}: no canonical settings fixture`).toBeDefined();
+          if (!fixture) throw new Error(`${toolId}: no canonical settings fixture`);
 
-          const fields: Array<{
-            name: string;
-            filename?: string;
-            contentType?: string;
-            content: Buffer | string;
-          }> = [];
-
-          // Primary file input
-          fields.push({
-            name: "file",
-            filename: fixture.filename,
-            contentType: "application/octet-stream",
-            content: fixture.buffer(),
-          });
-
-          // Multi-input tools: add a second file
-          if (MULTI_INPUT_TOOLS.has(toolId)) {
-            fields.push({
-              name: "file",
-              filename: "subtitles.srt",
-              contentType: "application/x-subrip",
-              content: SRT(),
-            });
-          }
-
-          // Settings field
-          fields.push({
-            name: "settings",
-            content: JSON.stringify(settings),
+          const fields = buildGeneratedMultipartFields({
+            toolId,
+            primary: { filename: fixture.filename, content: fixture.buffer() },
+            settings,
+            companions: {
+              image: { filename: IMAGE_FIX.filename, content: IMAGE_FIX.buffer() },
+              audio: { filename: AUDIO_FIX.filename, content: AUDIO_FIX.buffer() },
+              subtitle: { filename: "subtitles.srt", content: SRT() },
+            },
           });
 
           const { body, contentType } = createMultipartPayload(fields);
@@ -1206,13 +1204,35 @@ describe("settings variation matrix", () => {
             },
             payload: body,
           });
+          accounting.attempt();
+
+          if (res.statusCode === 501 && AI_GATED_TOOLS.has(toolId)) {
+            const payload = JSON.parse(res.body) as { code?: unknown };
+            const disposition = featureUnavailableDisposition({
+              toolId,
+              statusCode: res.statusCode,
+              code: payload.code,
+              requireAiFeatures: REQUIRE_AI_FEATURES,
+            });
+            if (disposition === "skip") {
+              accounting.skip("optional-feature", `${String(payload.code)} for ${label}`);
+              return;
+            }
+          }
+
+          // A host without ffmpeg cannot run media tools at all. That is the
+          // operator's container, not a product failure, and CI shards ship
+          // without ffmpeg by design, so record it and move on.
+          if (isEngineUnavailableResponse(res.statusCode, res.body)) {
+            accounting.skip("missing-host-binary", `engine unavailable for ${label}`);
+            return;
+          }
 
           // Core assertion: no 500 (internal server error / crash)
           expect(
             ACCEPTED_STATUSES.has(res.statusCode),
             `${toolId} [${label}]: got ${res.statusCode} -- ${res.body.slice(0, 500)}`,
           ).toBe(true);
-
           // For 200 responses, validate response shape
           if (res.statusCode === 200) {
             // Some tools (e.g. split) stream a ZIP binary instead of JSON.
@@ -1226,22 +1246,30 @@ describe("settings variation matrix", () => {
               // image-to-base64 returns { results, errors } instead of downloadUrl
               expect(json.downloadUrl || json.jobId || json.results).toBeTruthy();
             }
+            accounting.accept();
           }
 
-          // For 202 (async), just verify the jobId is present
+          // For 202, resolve the accepted job and validate its artifact.
           if (res.statusCode === 202) {
             const json = JSON.parse(res.body);
             expect(json.jobId).toBeTruthy();
-
-            // Settings coverage ends once OCR accepts the validated request.
-            // Cancel it so Fast/default cases cannot outlive the suite and
-            // starve unrelated conversions running in parallel forks.
-            if (toolId === "ocr" || toolId === "ocr-pdf") {
-              await cancelAcceptedJobAndWait(json.jobId as string, "ai");
+            try {
+              await waitForGeneratedJobArtifact(testApp.app, token, toolId, json.jobId as string);
+              accounting.accept();
+            } catch (error) {
+              // Tools whose input needs no probing are admitted normally and
+              // only meet the missing engine when ffmpeg is spawned.
+              if (!isEngineUnavailableFailure(error)) throw error;
+              accounting.skip("missing-host-binary", `engine unavailable for ${label}`);
             }
           }
-        }, 60_000); // Generous timeout for media processing tools
+          if (res.statusCode !== 200 && res.statusCode !== 202) accounting.reject();
+        }, 180_000); // Includes terminal async processing and artifact verification.
       }
+
+      it("conserves generated case accounting", () => {
+        accounting.assertCovered();
+      });
     });
   }
 });

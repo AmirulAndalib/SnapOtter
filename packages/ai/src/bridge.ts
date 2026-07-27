@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { context, propagation, SpanStatusCode, trace } from "@opentelemetry/api";
 import { isSafeMessageError, SafeError } from "@snapotter/shared";
@@ -34,7 +35,7 @@ function resolvePythonTimeout(explicitTimeout?: number): number | undefined {
  * package resolution, and locale -- avoids leaking secrets or
  * application config from the parent process.
  */
-function buildMinimalEnv(): Record<string, string> {
+export function buildMinimalEnv(): Record<string, string> {
   const env: Record<string, string> = {
     PYTHONUNBUFFERED: "1",
     LANG: process.env.LANG || "C.UTF-8",
@@ -67,17 +68,13 @@ function buildMinimalEnv(): Record<string, string> {
   env.DATA_DIR ??= "./data";
   env.MODELS_PATH ??= appendEnvPath(env.DATA_DIR, "ai/models");
 
-  // Runtime model downloads are allowed by default (public model weights
-  // only, never user data). SNAPOTTER_ALLOW_MODEL_DOWNLOAD=0 enables strict
-  // offline mode for airgapped deployments: the sidecar then gets the
-  // Hugging Face offline flags and every download fallback raises an
-  // actionable error instead of fetching. Bundle installs stay exempt
-  // because install_feature.py lifts the flags in its own process.
-  const allowModelDownload = process.env.SNAPOTTER_ALLOW_MODEL_DOWNLOAD;
-  if (allowModelDownload !== undefined) {
-    env.SNAPOTTER_ALLOW_MODEL_DOWNLOAD = allowModelDownload;
-  }
-  if (allowModelDownload === "0" || allowModelDownload?.toLowerCase() === "false") {
+  // Runtime downloads require an explicit opt-in. Feature bundle installs are
+  // unaffected: install_feature.py intentionally lifts Hugging Face's offline
+  // flags in its own process while it installs the signed bundle.
+  const allowModelDownload = process.env.SNAPOTTER_ALLOW_MODEL_DOWNLOAD?.toLowerCase();
+  const modelDownloadsEnabled = allowModelDownload === "1" || allowModelDownload === "true";
+  env.SNAPOTTER_ALLOW_MODEL_DOWNLOAD = modelDownloadsEnabled ? "1" : "0";
+  if (!modelDownloadsEnabled) {
     env.HF_HUB_OFFLINE = "1";
     env.TRANSFORMERS_OFFLINE = "1";
   }
@@ -87,7 +84,12 @@ function buildMinimalEnv(): Record<string, string> {
 /** Try venv first, then system python. */
 function getPythonPath(): string {
   const venvPath = process.env.PYTHON_VENV_PATH || resolve(__dirname, "../../../.venv");
-  return `${venvPath}/bin/python3`;
+  const path = process.platform === "win32" ? win32 : posix;
+  const venvPython = path.join(
+    venvPath,
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python3",
+  );
+  return existsSync(venvPython) ? venvPython : process.platform === "win32" ? "python" : "python3";
 }
 
 /**
@@ -185,6 +187,21 @@ function extractPythonError(error: unknown): string {
 }
 
 export type ProgressCallback = (percent: number, stage: string) => void;
+
+export interface PythonRunOptions {
+  onProgress?: ProgressCallback;
+  signal?: AbortSignal;
+  timeout?: number;
+}
+
+function pythonAbortError(): Error {
+  const error = new SafeError("Python script canceled", {
+    kind: "operational",
+    code: "canceled",
+  });
+  error.name = "AbortError";
+  return error;
+}
 
 // ── PythonDispatcher class ─────────────────────────────────────────
 
@@ -483,42 +500,51 @@ export class PythonDispatcher {
   private dispatcherRun(
     scriptName: string,
     args: string[],
-    options: { onProgress?: ProgressCallback; timeout?: number } = {},
+    options: PythonRunOptions = {},
   ): Promise<{ stdout: string; stderr: string }> | null {
+    if (options.signal?.aborted) return Promise.reject(pythonAbortError());
     const proc = this.getChild();
-    if (!proc || !proc.stdin || !this.childReady) return null;
+    const stdin = proc?.stdin;
+    if (!proc || !stdin || !this.childReady) return null;
 
     const id = randomUUID();
     const timeout = resolvePythonTimeout(options.timeout);
 
     return new Promise((resolvePromise, rejectPromise) => {
-      const timer =
-        timeout === undefined
-          ? undefined
-          : setTimeout(() => {
-              this.pending.delete(id);
-              // Kill the stuck dispatcher so it restarts on the next request instead of
-              // blocking all subsequent operations behind the timed-out script.
-              if (this.child && !this.child.killed) {
-                this.child.kill("SIGTERM");
-              }
-              rejectPromise(
-                new SafeError("Python script timed out", {
-                  kind: "operational",
-                  code: "timeout",
-                }),
-              );
-            }, timeout);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+      };
 
       const wrappedResolve = (result: { stdout: string; stderr: string }) => {
-        if (timer) clearTimeout(timer);
+        cleanup();
         resolvePromise(result);
       };
 
       const wrappedReject = (err: Error) => {
-        if (timer) clearTimeout(timer);
+        cleanup();
         rejectPromise(err);
       };
+
+      if (timeout !== undefined) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          // Kill the stuck dispatcher so it restarts on the next request instead of
+          // blocking all subsequent operations behind the timed-out script.
+          if (this.child && !this.child.killed) {
+            this.child.kill("SIGTERM");
+          }
+          wrappedReject(
+            new SafeError("Python script timed out", {
+              kind: "operational",
+              code: "timeout",
+            }),
+          );
+        }, timeout);
+      }
 
       this.pending.set(id, {
         resolve: wrappedResolve,
@@ -529,6 +555,25 @@ export class PythonDispatcher {
         // request is written to, so the current generation is its generation.
         generation: this.generation,
       });
+
+      onAbort = () => {
+        this.pending.delete(id);
+        // The dispatcher executes synchronously and has no request-level cancel
+        // protocol, so stopping the process is the only way to stop Python work.
+        // Treat this as intentional teardown, not a dispatcher crash.
+        this.stoppedChildren.add(proc);
+        if (this.child === proc) {
+          this.child = null;
+          this.childReady = false;
+        }
+        if (!proc.killed) proc.kill("SIGTERM");
+        wrappedReject(pythonAbortError());
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
 
       const msg: Record<string, unknown> = { id, script: scriptName.replace(".py", ""), args };
       const otelCarrier: Record<string, string> = {};
@@ -541,11 +586,10 @@ export class PythonDispatcher {
       }
       const request = JSON.stringify(msg);
       try {
-        proc.stdin!.write(request + "\n");
+        stdin.write(`${request}\n`);
       } catch {
         this.pending.delete(id);
-        if (timer) clearTimeout(timer);
-        rejectPromise(
+        wrappedReject(
           new SafeError("Python dispatcher stdin closed unexpectedly", {
             kind: "operational",
             code: "dispatcher-stdin-closed",
@@ -560,11 +604,9 @@ export class PythonDispatcher {
   private runPerRequest(
     scriptName: string,
     args: string[],
-    options: {
-      onProgress?: ProgressCallback;
-      timeout?: number;
-    } = {},
+    options: PythonRunOptions = {},
   ): Promise<{ stdout: string; stderr: string }> {
+    if (options.signal?.aborted) return Promise.reject(pythonAbortError());
     // Mirror the dispatcher's feature gate. The persistent dispatcher rejects
     // scripts whose bundle is not installed (in Python); this fallback spawns
     // scripts directly, so without the same check it would run them ungated
@@ -582,11 +624,44 @@ export class PythonDispatcher {
     const timeout = resolvePythonTimeout(options.timeout);
 
     return new Promise((resolvePromise, rejectPromise) => {
+      let activeAttempt = 0;
+      let activeProcess: ChildProcess | null = null;
+      let activeTimer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+
+      const cleanup = () => {
+        if (activeTimer) clearTimeout(activeTimer);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        rejectPromise(error);
+      };
+      const resolveOnce = (result: { stdout: string; stderr: string }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolvePromise(result);
+      };
+      const onAbort = () => {
+        if (settled) return;
+        const processToStop = activeProcess;
+        // Invalidate callbacks from the killed attempt before signaling it.
+        activeAttempt++;
+        if (processToStop && !processToStop.killed) processToStop.kill("SIGTERM");
+        rejectOnce(pythonAbortError());
+      };
+
       const trySpawn = (pythonBin: string, isFallback: boolean) => {
+        if (settled) return;
+        const attempt = ++activeAttempt;
         const proc = spawn(pythonBin, [scriptPath, ...args], {
           stdio: ["ignore", "pipe", "pipe"],
           env: this.buildEnv(),
         });
+        activeProcess = proc;
 
         let stdout = "";
         const stderrLines: string[] = [];
@@ -597,9 +672,11 @@ export class PythonDispatcher {
           timeout === undefined
             ? undefined
             : setTimeout(() => {
+                if (attempt !== activeAttempt) return;
                 timedOut = true;
                 proc.kill("SIGTERM");
               }, timeout);
+        activeTimer = timer;
 
         proc.stdout.on("data", (chunk: Buffer) => {
           stdout += chunk.toString();
@@ -629,10 +706,11 @@ export class PythonDispatcher {
 
         proc.on("error", (err: NodeJS.ErrnoException) => {
           if (timer) clearTimeout(timer);
+          if (attempt !== activeAttempt) return;
           if (err.code === "ENOENT" && !isFallback) {
             trySpawn("python3", true);
           } else {
-            rejectPromise(
+            rejectOnce(
               new SafeError(extractPythonError(err) || "Failed to start Python process", {
                 kind: "operational",
                 code: err.code ?? "spawn-error",
@@ -643,13 +721,14 @@ export class PythonDispatcher {
 
         proc.on("close", (code, signal) => {
           if (timer) clearTimeout(timer);
+          if (attempt !== activeAttempt) return;
 
           if (stderrBuffer.trim()) {
             stderrLines.push(stderrBuffer.trim());
           }
 
           if (timedOut) {
-            rejectPromise(
+            rejectOnce(
               new SafeError("Python script timed out", { kind: "operational", code: "timeout" }),
             );
             return;
@@ -658,16 +737,21 @@ export class PythonDispatcher {
           const stderr = stderrLines.join("\n");
 
           if (code !== 0) {
-            rejectPromise(
+            rejectOnce(
               pythonExitError(code, signal, extractPythonError({ stdout: stdout.trim(), stderr })),
             );
             return;
           }
 
-          resolvePromise({ stdout: stdout.trim(), stderr });
+          resolveOnce({ stdout: stdout.trim(), stderr });
         });
       };
 
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
       trySpawn(getPythonPath(), false);
     });
   }
@@ -752,10 +836,7 @@ export class PythonDispatcher {
   run(
     scriptName: string,
     args: string[],
-    options: {
-      onProgress?: ProgressCallback;
-      timeout?: number;
-    } = {},
+    options: PythonRunOptions = {},
   ): Promise<{ stdout: string; stderr: string }> {
     const tracer = trace.getTracer("snapotter-sidecar");
     const span = trace.getActiveSpan()
@@ -867,10 +948,7 @@ export function initDispatcher(timeoutMs = 30_000): Promise<{ ready: boolean; gp
 export function runPythonWithProgress(
   scriptName: string,
   args: string[],
-  options: {
-    onProgress?: ProgressCallback;
-    timeout?: number;
-  } = {},
+  options: PythonRunOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
   return getAiDispatcher().run(scriptName, args, options);
 }

@@ -1,8 +1,9 @@
 ---
 description: "Installa SnapOtter con Docker in un solo comando. Include la configurazione di Docker Compose, la compilazione dal codice sorgente e una panoramica completa delle funzionalità."
-i18n_output_hash: 193499a11aa6
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: 5061d54954a1
+i18n_hash_version: 2
 ---
 
 # Per iniziare {#getting-started}
@@ -17,7 +18,7 @@ Esplora l'interfaccia completa su [demo.snapotter.com](https://demo.snapotter.co
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Questo singolo container esegue tutto ciò di cui ha bisogno: senza alcun `DATABASE_URL` impostato, avvia il proprio PostgreSQL e Redis sull'interfaccia loopback (modalità integrata) e conserva tutti i dati nel volume `SnapOtter-data`. È il modo più rapido per provare SnapOtter o auto-ospitarlo su un homelab. Per la produzione, esegui lo stack [Docker Compose](#docker-compose) qui sotto, che mantiene PostgreSQL e Redis nei loro container. La modalità integrata gira come root (l'impostazione predefinita) e si disattiva automaticamente non appena imposti `DATABASE_URL`.
+Questo singolo contenitore esegue tutto ciò di cui ha bisogno: senza alcun set `DATABASE_URL`, avvia il proprio PostgreSQL e Redis sull'interfaccia di loopback (modalità incorporata) e mantiene tutti i dati nel volume `SnapOtter-data`. È il modo più veloce per provare SnapOtter o ospitare autonomamente un laboratorio domestico. Per la produzione, utilizzare lo [stack canonico Docker Compose](#docker-compose), che mantiene PostgreSQL e Redis nei propri contenitori. La modalità incorporata viene eseguita come root (impostazione predefinita) e si disattiva automaticamente non appena si imposta `DATABASE_URL`.
 
 Stai installando su un Raspberry Pi, un vecchio laptop o un piccolo VPS? Vedi [Configurazioni a basse risorse](/it/guide/low-resource) per una guida già calibrata e per sapere cosa aspettarti da hardware limitato.
 
@@ -40,7 +41,7 @@ Aggiungi `--gpus all` per NVIDIA rimozione dello sfondo, upscaling, migliorament
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Richiede il [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Effettua automaticamente il fallback su CPU quando CUDA non è disponibile. L'accelerazione tramite iGPU Intel/AMD attraverso VA-API, Quick Sync o OpenCL non è supportata per l'inferenza AI al momento. Vedi [Tag Docker](/it/guide/docker-tags) per i benchmark.
+Richiede [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Ritorna automaticamente alla CPU quando CUDA non è disponibile. L'accelerazione iGPU Intel/AMD tramite VA-API, Quick Sync o OpenCL non è attualmente supportata per l'inferenza AI. Vedi [Docker Tags](/it/guide/docker-tags) per i benchmark. Se gli strumenti AI vengono eseguiti sulla CPU nonostante `--gpus all`, vedere [Verificare l'accelerazione GPU](/it/guide/deployment#verify-gpu-acceleration).
 :::
 
 ::: details Anche su GHCR
@@ -51,67 +52,33 @@ docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data ghcr.io/snap
 Entrambi i registry pubblicano la stessa immagine a ogni rilascio.
 :::
 
-## Docker Compose {#docker-compose}
+## Docker Componi {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+Utilizza il file di produzione mantenuto e testato con ogni versione invece di copiare un esempio di Compose abbreviato da questa pagina:
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-Vedi [Configurazione](/it/guide/configuration) per tutte le variabili d'ambiente.
+Il [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) canonico include tutti e quattro i volumi di runtime, controlli di integrità, limiti delle risorse, configurazione Redis durevole, immagini di database/cache bloccate e l'attuale rafforzamento del contenitore. Modificare la password amministratore predefinita immediatamente dopo il primo accesso. Per una distribuzione riproducibile, aggiungi l'immagine dell'applicazione SnapOtter al tag di rilascio o al digest che hai verificato invece di seguire `latest`.
+
+Consulta [Configurazione](/it/guide/configuration) per tutte le variabili di ambiente e [Sicurezza e protezione avanzata](/it/guide/security) per segreti, criteri di rete e indicazioni sul backup.
 
 ## Compilazione dal codice sorgente {#build-from-source}
 
-**Prerequisiti:** Node.js 22+, pnpm 9+, Docker (per Postgres + Redis), Python 3.10+ (per le funzionalità AI), Git.
+**Prerequisiti:** Node.js 22.22+, pnpm 9+, Docker (per Postgres + Redis), Python 3.11+ (per le funzionalità AI), Git.
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- Frontend: [http://localhost:1349](http://localhost:1349)
+- Frontend: [http://localhost:1351](http://localhost:1351)
 - Backend: [http://localhost:13490](http://localhost:13490)
 
 ## Cosa puoi fare {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | Modalità | Numero | Strumenti di esempio |
 |----------|-------|---------------|
-| **Immagine** | 105 | Ridimensiona, Ritaglia, Comprimi, Converti, Rimuovi sfondo, Upscaling, OCR, Filigrana, Collage, Colorizza, Strumenti GIF, preset di formato |
+| **Immagine** | 107 | Ridimensiona, Ritaglia, Comprimi, Converti, Rimuovi sfondo, Upscaling, OCR, Filigrana, Collage, Colorizza, Strumenti GIF, preset di formato |
 | **Video** | 57 | Taglia, Ritaglia, Comprimi, Converti, Unisci, Estrai audio, Sottotitoli automatici, Da video a GIF, Ridimensiona, Stabilizza, preset di formato |
 | **Audio** | 27 | Taglia, Unisci, Converti, Normalizza, Riduzione del rumore, Trascrivi, Cambio di tonalità, Dissolvenza, Creatore di suonerie, preset di formato |
-| **PDF / Documenti** | 42 | Unisci, Dividi, Comprimi, OCR, Filigrana, Oscura, Da Word a PDF, Da Excel a PDF, Ruota, Proteggi, Ripara |
-| **File** | 10 | Da CSV a JSON, Da JSON a XML, Unisci CSV, Dividi CSV, Crea ZIP, Estrai ZIP, Creatore di grafici, YAML/JSON |
+| **PDF / Documenti** | 29 | Unisci, Dividi, Comprimi, OCR, Filigrana, Oscura, Da Word a PDF, Da Excel a PDF, Ruota, Proteggi, Ripara |
+| **File** | 23 | Da CSV a JSON, Da JSON a XML, Unisci CSV, Dividi CSV, Crea ZIP, Estrai ZIP, Creatore di grafici, YAML/JSON |
 
 ### Pipeline {#pipelines}
 

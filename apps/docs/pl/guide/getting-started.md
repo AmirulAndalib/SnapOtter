@@ -1,8 +1,9 @@
 ---
 description: "Zainstaluj SnapOtter za pomocą Dockera jednym poleceniem. Zawiera konfigurację Docker Compose, budowanie ze źródeł i pełny przegląd funkcji."
-i18n_output_hash: 3d17e456c824
-i18n_source_hash: 68bf7f60b68d
-i18n_provenance: human
+i18n_source_hash: 8040133a6982
+i18n_provenance: machine
+i18n_output_hash: b210f3fec848
+i18n_hash_version: 2
 ---
 
 # Pierwsze kroki {#getting-started}
@@ -17,7 +18,7 @@ Poznaj pełny interfejs pod adresem [demo.snapotter.com](https://demo.snapotter.
 docker run -d --name SnapOtter -p 1349:1349 -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Ten pojedynczy kontener uruchamia wszystko, czego potrzebuje: bez ustawionego `DATABASE_URL` uruchamia własne PostgreSQL i Redis na interfejsie pętli zwrotnej (tryb wbudowany) i przechowuje wszystkie dane w wolumenie `SnapOtter-data`. To najszybszy sposób, aby wypróbować SnapOtter lub hostować samodzielnie w domowym laboratorium. Na produkcję uruchom stos [Docker Compose](#docker-compose) poniżej, który utrzymuje PostgreSQL i Redis w ich własnych kontenerach. Tryb wbudowany działa jako root (domyślnie) i wyłącza się automatycznie, gdy tylko ustawisz `DATABASE_URL`.
+Ten pojedynczy kontener obsługuje wszystko, czego potrzebuje: bez zestawu `DATABASE_URL` uruchamia własne PostgreSQL i Redis w interfejsie pętli zwrotnej (tryb osadzony) i przechowuje wszystkie dane w wolumenie `SnapOtter-data`. Jest to najszybszy sposób na wypróbowanie SnapOtter lub samodzielnego hostowania w laboratorium domowym. Do celów produkcyjnych użyj [kanonicznego stosu Docker Compose](#docker-compose), który przechowuje PostgreSQL i Redis w ich własnych kontenerach. Tryb osadzony działa jako root (domyślnie) i wyłącza się automatycznie po ustawieniu `DATABASE_URL`.
 
 Instalujesz na Raspberry Pi, starym laptopie albo małym VPS-ie? Zobacz [Konfiguracje o ograniczonych zasobach](/pl/guide/low-resource) po dostrojony przewodnik krok po kroku i to, czego można oczekiwać od ograniczonego sprzętu.
 
@@ -40,7 +41,7 @@ Dodaj `--gpus all`, aby uzyskać NVIDIA przyspieszane przez CUDA usuwanie tła, 
 docker run -d --name SnapOtter -p 1349:1349 --gpus all -v SnapOtter-data:/data snapotter/snapotter:latest
 ```
 
-Wymaga [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Automatycznie przełącza się na CPU, gdy CUDA jest niedostępne. Przyspieszanie iGPU Intel/AMD przez VA-API, Quick Sync lub OpenCL nie jest obecnie obsługiwane dla wnioskowania AI. Zobacz [Tagi Docker](/pl/guide/docker-tags) po testy wydajności.
+Wymaga [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Automatycznie powraca do procesora, gdy CUDA jest niedostępna. Akceleracja Intel/AMD iGPU poprzez VA-API, Quick Sync lub OpenCL nie jest obecnie obsługiwana w przypadku wnioskowania AI. Zobacz [Tagi Dockera](/pl/guide/docker-tags), aby zapoznać się z testami porównawczymi. Jeśli narzędzia AI działają na procesorze pomimo `--gpus all`, zobacz [Sprawdź przyspieszenie GPU](/pl/guide/deployment#verify-gpu-acceleration).
 :::
 
 ::: details Także na GHCR
@@ -53,65 +54,31 @@ Oba rejestry publikują ten sam obraz przy każdym wydaniu.
 
 ## Docker Compose {#docker-compose}
 
-```yaml
-services:
-  SnapOtter:
-    image: snapotter/snapotter:latest  # or ghcr.io/snapotter-hq/snapotter:latest
-    ports:
-      - "1349:1349"
-    volumes:
-      - SnapOtter-data:/data
-    environment:
-      - AUTH_ENABLED=true
-      - DEFAULT_USERNAME=admin
-      - DEFAULT_PASSWORD=admin
-      - DATABASE_URL=postgres://snapotter:snapotter@postgres:5432/snapotter
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+Użyj pliku produkcyjnego utrzymywanego i testowanego w każdym wydaniu, zamiast kopiować skrócony przykład tworzenia z tej strony:
 
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
-      POSTGRES_DB: snapotter
-    volumes:
-      - SnapOtter-pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+```bash
+install -d -m 700 snapotter && cd snapotter
+curl --proto '=https' --tlsv1.2 -fsSLo docker-compose.yml \
+  https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v2.1.0/docker/docker-compose.yml
 
-  redis:
-    image: redis:8-alpine
-    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
-    volumes:
-      - SnapOtter-redisdata:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+# Keep generated service credentials out of shell history and world-readable files.
+umask 077
+POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+REDIS_PASSWORD="$(openssl rand -hex 32)"
+printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\n' \
+  "$POSTGRES_PASSWORD" "$REDIS_PASSWORD" > .env
 
-volumes:
-  SnapOtter-data:
-  SnapOtter-pgdata:
-  SnapOtter-redisdata:
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
 ```
 
-Zobacz [Konfigurację](/pl/guide/configuration) po wszystkie zmienne środowiskowe.
+Kanoniczny [`docker/docker-compose.yml`](https://github.com/snapotter-hq/SnapOtter/blob/v2.1.0/docker/docker-compose.yml) obejmuje wszystkie cztery woluminy wykonawcze, kontrole stanu, limity zasobów, trwałą konfigurację Redis, przypięte obrazy bazy danych/pamięci podręcznej oraz bieżące zabezpieczenie kontenera. Zmień domyślne hasło administratora natychmiast po pierwszym logowaniu. Aby zapewnić powtarzalne wdrożenie, przypnij obraz aplikacji SnapOtter do zweryfikowanego znacznika wydania lub podsumowania, zamiast podążać za `latest`.
+
+Zobacz [Konfiguracja](/pl/guide/configuration) w celu uzyskania wszystkich zmiennych środowiskowych oraz [Zabezpieczenia i wzmacnianie](/pl/guide/security), aby uzyskać informacje tajne, zasady sieciowe i wskazówki dotyczące tworzenia kopii zapasowych.
 
 ## Budowanie ze źródeł {#build-from-source}
 
-**Wymagania wstępne:** Node.js 22+, pnpm 9+, Docker (dla Postgres + Redis), Python 3.10+ (dla funkcji AI), Git.
+**Wymagania wstępne:** Node.js 22.22+, pnpm 9+, Docker (dla Postgres + Redis), Python 3.11+ (dla funkcji AI), Git.
 
 ```bash
 git clone https://github.com/snapotter-hq/SnapOtter.git
@@ -121,7 +88,7 @@ pnpm install
 pnpm dev
 ```
 
-- Frontend: [http://localhost:1349](http://localhost:1349)
+- Frontend: [http://localhost:1351](http://localhost:1351)
 - Backend: [http://localhost:13490](http://localhost:13490)
 
 ## Co możesz zrobić {#what-you-can-do}
@@ -130,11 +97,11 @@ pnpm dev
 
 | Modalność | Liczba | Przykładowe narzędzia |
 |----------|-------|---------------|
-| **Obraz** | 105 | Zmiana rozmiaru, Kadrowanie, Kompresja, Konwersja, Usuwanie tła, Skalowanie w górę, OCR, Znak wodny, Kolaż, Koloryzacja, Narzędzia GIF, szablony formatów |
+| **Obraz** | 107 | Zmiana rozmiaru, Kadrowanie, Kompresja, Konwersja, Usuwanie tła, Skalowanie w górę, OCR, Znak wodny, Kolaż, Koloryzacja, Narzędzia GIF, szablony formatów |
 | **Wideo** | 57 | Przycinanie, Kadrowanie, Kompresja, Konwersja, Łączenie, Wyodrębnianie audio, Automatyczne napisy, Wideo do GIF, Zmiana rozmiaru, Stabilizacja, szablony formatów |
 | **Audio** | 27 | Przycinanie, Łączenie, Konwersja, Normalizacja, Redukcja szumów, Transkrypcja, Zmiana wysokości dźwięku, Wyciszanie, Kreator dzwonków, szablony formatów |
-| **PDF / Dokument** | 42 | Łączenie, Dzielenie, Kompresja, OCR, Znak wodny, Redagowanie, Word do PDF, Excel do PDF, Obracanie, Zabezpieczanie, Naprawa |
-| **Pliki** | 10 | CSV do JSON, JSON do XML, Łączenie CSV, Dzielenie CSV, Tworzenie ZIP, Wyodrębnianie ZIP, Kreator wykresów, YAML/JSON |
+| **PDF / Dokument** | 29 | Łączenie, Dzielenie, Kompresja, OCR, Znak wodny, Redagowanie, Word do PDF, Excel do PDF, Obracanie, Zabezpieczanie, Naprawa |
+| **Pliki** | 23 | CSV do JSON, JSON do XML, Łączenie CSV, Dzielenie CSV, Tworzenie ZIP, Wyodrębnianie ZIP, Kreator wykresów, YAML/JSON |
 
 ### Potoki {#pipelines}
 

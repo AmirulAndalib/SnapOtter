@@ -1,8 +1,9 @@
 ---
 description: "การตั้งค่าสภาพแวดล้อมการพัฒนาในเครื่อง คำสั่ง แนวทางการเขียนโค้ด และวิธีเพิ่มเครื่องมือใหม่ใน SnapOtter"
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 66d6a87e1e3d
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: a42eaf432db1
+i18n_hash_version: 2
 ---
 
 # คู่มือนักพัฒนา {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: 66d6a87e1e3d
 
 ## สิ่งที่ต้องมีก่อน {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (จำเป็นสำหรับ Postgres + Redis ในเครื่อง, การ build คอนเทนเนอร์ และฟีเจอร์ AI)
 - Git
 
-ต้องมี Python 3.10+ เฉพาะเมื่อคุณกำลังทำงานกับ AI/ML sidecar (การลบพื้นหลัง, การขยายภาพ, OCR) เท่านั้น
+ต้องมี Python 3.11+ เฉพาะเมื่อคุณกำลังทำงานกับ AI/ML sidecar (การลบพื้นหลัง, การขยายภาพ, OCR) เท่านั้น
 
 ## การตั้งค่า {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | บริการ  | URL                      | หมายเหตุ                              |
 |----------|--------------------------|------------------------------------|
-| Frontend | http://localhost:1349     | Vite dev server, proxy /api      |
+| Frontend | http://localhost:1351     | Vite dev server, proxy /api      |
 | Backend  | http://localhost:13490    | Fastify API (เข้าถึงผ่าน proxy)   |
 
-เปิด http://localhost:1349 ในเบราว์เซอร์ของคุณ เข้าสู่ระบบด้วย `admin` / `admin` คุณจะได้รับแจ้งให้เปลี่ยนรหัสผ่านตอนเข้าสู่ระบบครั้งแรก
+เปิด http://localhost:1351 ในเบราว์เซอร์ของคุณ เข้าสู่ระบบด้วย `admin` / `admin` คุณจะได้รับแจ้งให้เปลี่ยนรหัสผ่านตอนเข้าสู่ระบบครั้งแรก
 
 ## โครงสร้างโปรเจกต์ {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## โดเมนเวอร์ชันวางจำหน่าย {#release-version-domains}
+
+SnapOtter มีเจตนาให้มีโดเมนสามเวอร์ชัน อย่าคัดลอกโดเมนหนึ่งไปยังอีกโดเมนหนึ่งในระหว่างการเผยแพร่:
+
+- เวอร์ชันเผยแพร่ของแอปพลิเคชันครอบคลุม Root Manifest แพ็คเกจพื้นที่ทำงานส่วนตัวทั้งหมด และ `APP_VERSION` Semantic-release ระบุค่านี้ และ `pnpm version:sync <version>` จะอัปเดตทุกพื้นที่ทำงานก่อนที่จะเผยแพร่แอปพลิเคชัน
+- OpenAPI `info.version` เป็นสัญญาหลัก API สาธารณะที่มีความเสถียร ข้อมูลจำเพาะที่แปลเป็นภาษาท้องถิ่นทั้งหมดจะยังคงอยู่ใน `<major>.0.0` สำหรับการเปิดตัวแอปพลิเคชันที่เข้ากันได้ และเปลี่ยนแปลงเฉพาะเมื่อสัญญา API ย้ายไปเป็นเวอร์ชันหลักใหม่
+- `docker/feature-manifest.json` คง `imageVersion: 2.0.0` ไว้เป็นยุคพื้นที่จัดเก็บข้อมูลบันเดิลฟีเจอร์ดั้งเดิมที่ไม่เปลี่ยนรูปแบบ เส้นทางการเก็บถาวร v2 เหล่านั้นไม่ใช่เวอร์ชันแพ็คเกจแอปพลิเคชัน OCR ที่แม่นยำใช้รูปแบบรันไทม์ v3 และบันทึกที่มาของการเปิดตัวแอปพลิเคชันแยกกัน
+
+`tests/unit/infra/release-version-policy.test.ts` บังคับใช้ขอบเขตเหล่านี้ โดเมนเวอร์ชันใหม่หรือการโยกย้ายจะต้องอัปเดตสัญญานั้นและการออกแบบการโยกย้ายส่วนที่เกี่ยวข้องร่วมกัน
+ค่า API อิสระและชุดดั้งเดิมอยู่ใน `config/release-version-policy.json` การซิงโครไนซ์เวอร์ชันแอปพลิเคชันจะต้องไม่เขียนไฟล์นโยบายนั้นซ้ำโดยปริยาย
 
 ## ตัวแปรสภาพแวดล้อม {#environment-variables}
 

@@ -2,12 +2,16 @@ import { join } from "node:path";
 import { probeMedia } from "@snapotter/media-engine";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { runFfmpegWithProgress, stageMediaInputs } from "../../lib/media-tool.js";
+import {
+  formatFfmpegSeconds,
+  runFfmpegWithProgress,
+  stageMediaInputs,
+} from "../../lib/media-tool.js";
 import { InputValidationError } from "../../modality/contract.js";
 import { createToolRoute } from "../tool-factory.js";
 
 const settingsSchema = z.object({
-  startS: z.number().min(0).default(0),
+  startS: z.number().finite().min(0).default(0),
   durationS: z.number().min(1).max(30).default(30),
 });
 
@@ -35,9 +39,9 @@ export function registerRingtoneMaker(app: FastifyInstance) {
         ctx,
         [
           "-ss",
-          String(settings.startS),
+          formatFfmpegSeconds(settings.startS),
           "-t",
-          String(settings.durationS),
+          formatFfmpegSeconds(settings.durationS),
           "-i",
           inPath,
           "-vn",

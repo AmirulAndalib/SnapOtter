@@ -1,8 +1,9 @@
 ---
 description: "Yerel geliştirme kurulumu, komutlar, kod kuralları ve SnapOtter'a yeni bir araç ekleme."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: ca6f585e8551
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: d3dfe2907fbb
+i18n_hash_version: 2
 ---
 
 # Geliştirici kılavuzu {#developer-guide}
@@ -11,12 +12,12 @@ Yerel bir geliştirme ortamı kurma ve SnapOtter'a kod katkısında bulunma.
 
 ## Ön koşullar {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (yerel Postgres + Redis, container derlemeleri ve AI özellikleri için gerekli)
 - Git
 
-Python 3.10+ yalnızca AI/ML yardımcı işlemi (arka plan kaldırma, ölçek büyütme, OCR) üzerinde çalışıyorsanız gereklidir.
+Python 3.11+ yalnızca AI/ML yardımcı işlemi (arka plan kaldırma, ölçek büyütme, OCR) üzerinde çalışıyorsanız gereklidir.
 
 ## Kurulum {#setup}
 
@@ -32,10 +33,10 @@ Bu, iki geliştirme sunucusunu başlatır:
 
 | Servis  | URL                      | Notlar                              |
 |----------|--------------------------|------------------------------------|
-| Ön uç | http://localhost:1349     | Vite geliştirme sunucusu, /api proxy'ler      |
+| Ön uç | http://localhost:1351     | Vite geliştirme sunucusu, /api proxy'ler      |
 | Arka uç  | http://localhost:13490    | Fastify API (proxy üzerinden erişilir)   |
 
-Tarayıcınızda http://localhost:1349 adresini açın. `admin` / `admin` ile oturum açın. İlk oturum açmada parolayı değiştirmeniz istenir.
+Tarayıcınızda http://localhost:1351 adresini açın. `admin` / `admin` ile oturum açın. İlk oturum açmada parolayı değiştirmeniz istenir.
 
 ## Proje yapısı {#project-structure}
 
@@ -219,6 +220,17 @@ Daha hızlı yeniden derlemeler için BuildKit önbellek bağlamalarını kullan
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## Sürüm etki alanlarını yayınlayın {#release-version-domains}
+
+SnapOtter kasıtlı olarak üç sürüm alanına sahiptir. Sürüm sırasında bir alanı diğerine kopyalamayın:
+
+- Uygulama yayın sürümü, kök bildirimi, tüm özel çalışma alanı paketlerini ve `APP_VERSION`'yi kapsar. Semantic-release bu değeri sağlar ve `pnpm version:sync <version>`, bir uygulama yayınlanmadan önce her çalışma alanını günceller.
+- OpenAPI `info.version`, istikrarlı halka açık API ana sözleşmesidir. Tüm yerelleştirilmiş özellikler, uyumlu uygulama sürümleri için `<major>.0.0`'de kalır ve yalnızca API sözleşmesi yeni bir ana sürüme taşındığında değişir.
+- `docker/feature-manifest.json`, `imageVersion: 2.0.0`'yi değişmez eski özellik paketi depolama çağı olarak koruyor. Bu v2 arşiv yolları uygulama paketi sürümleri değildir. Accurate OCR, çalışma zamanı formatı v3'ü kullanır ve uygulama yayın kaynağını ayrı olarak kaydeder.
+
+`tests/unit/infra/release-version-policy.test.ts` bu sınırları zorlar. Yeni bir sürüm etki alanı veya geçişi, söz konusu sözleşmeyi ve ilgili yapıt geçiş tasarımını birlikte güncellemelidir.
+Bağımsız API ve eski paket değerleri `config/release-version-policy.json`'de bulunur; uygulama sürümü senkronizasyonu bu politika dosyasını hiçbir zaman örtülü olarak yeniden yazmamalıdır.
 
 ## Ortam değişkenleri {#environment-variables}
 

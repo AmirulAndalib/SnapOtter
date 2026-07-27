@@ -1,8 +1,9 @@
 ---
 description: "Distribuisci SnapOtter in produzione con Docker. Requisiti hardware, configurazione GPU e configurazioni di reverse proxy per Nginx, Traefik e Cloudflare."
-i18n_output_hash: 28e72d02cd08
-i18n_source_hash: 98172965118b
+i18n_source_hash: 2a722f86da75
 i18n_provenance: human
+i18n_output_hash: ba64458b434b
+i18n_hash_version: 2
 ---
 
 # Distribuzione {#deployment}
@@ -47,7 +48,7 @@ services:
       # - MAX_USERS=0              # Max user accounts
 
       # --- Networking ---
-      # - TRUST_PROXY=true         # Trust X-Forwarded-For headers (set false if not behind a proxy)
+      # - TRUST_PROXY=loopback,linklocal,uniquelocal  # Which peers may set the client IP via X-Forwarded-For (default shown)
 
       # --- Bind mount permissions ---
       # - PUID=1000                # Match your host user's UID (run: id -u)
@@ -82,7 +83,7 @@ services:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -170,13 +171,13 @@ services:
     container_name: SnapOtter-postgres
     environment:
       POSTGRES_USER: snapotter
-      POSTGRES_PASSWORD: snapotter
+      POSTGRES_PASSWORD: snapotter     # Modificarlo per distribuzioni non locali
       POSTGRES_DB: snapotter
     volumes:
       - SnapOtter-pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U snapotter"]
+      test: ["CMD-SHELL", "pg_isready -U snapotter -d snapotter"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -207,12 +208,16 @@ volumes:
 docker compose -f docker-compose-gpu.yml up -d
 ```
 
-Controlla il rilevamento di CUDA nei log:
+### Verifica l'accelerazione GPU {#verify-gpu-acceleration}
+
+Controlla il rilevamento CUDA nei log:
 
 ```bash
 docker logs SnapOtter 2>&1 | head -20
 # Look for: [gpu] CUDA available via torch
 ```
+
+Se gli strumenti AI vengono eseguiti sulla CPU anche se `--gpus all` e NVIDIA Container Toolkit sono configurati correttamente, reinstallare il pacchetto interessato (ad esempio Rimozione sfondo) da **Impostazioni → Funzionalità AI**. Il programma di installazione ripristina la build GPU di ONNX Runtime, che una build solo CPU inserita da un altro bundle (come la trascrizione) potrebbe altrimenti oscurare nell'ambiente AI condiviso. Se la reinstallazione dall'interfaccia utente non ripristina la GPU su un'immagine precedente, consulta la riparazione manuale nel [problema n. 490](https://github.com/snapotter-hq/SnapOtter/issues/490).
 
 ## Requisiti hardware {#hardware-requirements}
 
@@ -436,11 +441,11 @@ L'errore di avvio indica l'UID esatto da usare, quindi il percorso più rapido �
 | `AUTH_ENABLED` | `true` | Abilita/disabilita il requisito di login |
 | `DEFAULT_USERNAME` | `admin` | Nome utente admin iniziale |
 | `DEFAULT_PASSWORD` | `admin` | Password admin iniziale (cambio forzato al primo login) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Limite di upload per file |
-| `MAX_BATCH_SIZE` | `100` | Numero massimo di file per richiesta batch |
+| `MAX_UPLOAD_SIZE_MB` | `0` (illimitato) | Limite di upload per file in MB. L'immagine viene fornita con `0`; una build dai sorgenti parte da 100 |
+| `MAX_BATCH_SIZE` | `0` (illimitato) | Numero massimo di file per richiesta batch. L'immagine viene fornita con `0`; una build dai sorgenti parte da 100 |
 | `RATE_LIMIT_PER_MIN` | `1000` | Richieste API al minuto per IP (imposta 0 per disabilitare) |
 | `MAX_USERS` | `0` (illimitato) | Numero massimo di account utente |
-| `TRUST_PROXY` | `true` | Fidati degli header X-Forwarded-For dal reverse proxy |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Quali peer possono impostare l'IP del client tramite `X-Forwarded-For`. Solo reti private per impostazione predefinita |
 | `PUID` | `999` | Esegui con questo UID (per i permessi dei bind mount) |
 | `PGID` | `999` | Esegui con questo GID (per i permessi dei bind mount) |
 | `LOG_LEVEL` | `info` | Verbosità dei log: fatal, error, warn, info, debug, trace |
@@ -483,7 +488,13 @@ curl http://localhost:1349/api/v1/health
 
 ## Reverse Proxy {#reverse-proxy}
 
-SnapOtter imposta `TRUST_PROXY=true` per impostazione predefinita, così il rate limiting e il logging usano l'IP reale del client dagli header `X-Forwarded-For`.
+`TRUST_PROXY` vale `loopback,linklocal,uniquelocal` per impostazione predefinita, quindi SnapOtter crede all'intestazione `X-Forwarded-For` solo se arriva da un peer su una rete privata. Un reverse proxy sullo stesso host, su una rete Docker o sulla tua LAN è attendibile fin da subito, il che significa che il rate limiting, il limitatore anti forza bruta del login, il log di audit e la allowlist di IP dell'edizione enterprise vedono tutti l'IP reale del client senza alcuna configurazione.
+
+Imposta `TRUST_PROXY=true` solo quando il proxy davanti raggiunge SnapOtter da un indirizzo **pubblico**, per esempio un bilanciatore di carico cloud su un'altra rete. Su un'istanza esposta direttamente quel valore rende `request.ip` controllabile da un attaccante, perché chi ruota l'intestazione ottiene un contatore di rate limit nuovo a ogni richiesta.
+
+Due cose da sapere prima di metterti a misurare gli IP dei client. Docker Desktop su macOS e Windows serve una porta pubblicata attraverso un proxy in spazio utente che riscrive ogni indirizzo di origine sul gateway della VM `192.168.65.1`, quindi lì nessun valore di `TRUST_PROXY` recupera il client reale; per tutto ciò che è esposto a internet usa Linux. E su qualsiasi piattaforma, raggiungere una porta pubblicata tramite `localhost` viene osservato come il gateway del bridge e non come il tuo client, perciò una prova in locale non dice nulla su come venga attribuito un client reale. La tabella completa dei valori di `TRUST_PROXY` e l'avvertenza su Docker Desktop sono in [SECURITY.md](https://github.com/snapotter-hq/SnapOtter/blob/main/SECURITY.md#client-ip-resolution-trust_proxy).
+
+Due cose contano per ogni proxy riportato di seguito: consentire corpi di richieste di grandi dimensioni (caricamenti) e non bufferizzare le risposte. Un proxy con buffer di risposta interrompe l'avanzamento di SSE e, in modo più visibile, fa sì che il download di un file di grandi dimensioni "avvii ma non finisca mai", perché il proxy trattiene l'intero file prima di trasmetterlo. SnapOtter invia `X-Accel-Buffering: no` sui download in modo che nginx li trasmetta in streaming anche se il buffering è lasciato attivo altrove, ma i proxy diversi da nginx necessitano che il buffering della risposta sia disabilitato esplicitamente (mostrato in ciascuna configurazione di seguito). Se un download si blocca parzialmente, la prima cosa da controllare è un proxy di buffering di fronte.
 
 ### Nginx {#nginx}
 
@@ -505,7 +516,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # SSE support (batch progress, feature install progress)
+        # Risposte in streaming anziché buffering: necessarie per l'avanzamento di SSE (batch, AI, installazioni di funzionalità) e per download di file di grandi dimensioni.
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -549,7 +560,7 @@ images.example.com {
 }
 ```
 
-`flush_interval -1` disabilita il buffering delle risposte, che è richiesto per gli eventi di avanzamento SSE (elaborazione batch, strumenti AI, installazioni di funzionalità). I timeout estesi permettono agli upload di file grandi di completarsi senza che Caddy chiuda la connessione in anticipo.
+`flush_interval -1` disabilita il buffering della risposta, necessario per gli eventi di avanzamento di SSE (elaborazione batch, strumenti AI, installazioni di funzionalità) e per lo streaming di download di file di grandi dimensioni anziché in stallo. I timeout estesi consentono il completamento dei caricamenti di file di grandi dimensioni senza che Caddy chiuda anticipatamente la connessione.
 
 ### Cloudflare Tunnels {#cloudflare-tunnels}
 

@@ -1,8 +1,9 @@
 ---
 description: "إعداد بيئة التطوير المحلية، والأوامر، وأعراف الكود، وكيفية إضافة أداة جديدة إلى SnapOtter."
-i18n_source_hash: cb03724d2829
-i18n_provenance: human
-i18n_output_hash: 297ae392c8cf
+i18n_source_hash: 56acc1bf9a9b
+i18n_provenance: machine
+i18n_output_hash: ce1345aa5ed2
+i18n_hash_version: 2
 ---
 
 # دليل المطوّر {#developer-guide}
@@ -11,12 +12,12 @@ i18n_output_hash: 297ae392c8cf
 
 ## المتطلبات المسبقة {#prerequisites}
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) 22.22+
 - [pnpm](https://pnpm.io/) 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
 - [Docker](https://www.docker.com/) (مطلوب لـ Postgres + Redis المحليين، وبناء الحاويات، وميزات الذكاء الاصطناعي)
 - Git
 
-يلزم Python 3.10+ فقط إذا كنت تعمل على الوحدة الجانبية للذكاء الاصطناعي/تعلّم الآلة (إزالة الخلفية، والتكبير، وOCR).
+يلزم Python 3.11+ فقط إذا كنت تعمل على الوحدة الجانبية للذكاء الاصطناعي/تعلّم الآلة (إزالة الخلفية، والتكبير، وOCR).
 
 ## الإعداد {#setup}
 
@@ -32,10 +33,10 @@ pnpm dev
 
 | الخدمة  | العنوان                      | ملاحظات                              |
 |----------|--------------------------|------------------------------------|
-| الواجهة الأمامية | http://localhost:1349     | خادم تطوير Vite، يعمل كوكيل لـ /api      |
+| الواجهة الأمامية | http://localhost:1351     | خادم تطوير Vite، يعمل كوكيل لـ /api      |
 | الواجهة الخلفية  | http://localhost:13490    | واجهة Fastify API (يُوصَل إليها عبر الوكيل)   |
 
-افتح http://localhost:1349 في متصفحك. سجّل الدخول بـ `admin` / `admin`. سيُطلَب منك تغيير كلمة المرور عند أول تسجيل دخول.
+افتح http://localhost:1351 في متصفحك. سجّل الدخول بـ `admin` / `admin`. سيُطلَب منك تغيير كلمة المرور عند أول تسجيل دخول.
 
 ## بنية المشروع {#project-structure}
 
@@ -219,6 +220,17 @@ docker build -f docker/Dockerfile -t snapotter:latest .
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t snapotter:latest .
 ```
+
+## مجالات الإصدار الإصدار {#release-version-domains}
+
+يحتوي SnapOtter على ثلاثة مجالات إصدار عمدًا. لا تقم بنسخ نطاق إلى آخر أثناء الإصدار:
+
+- يغطي إصدار إصدار التطبيق بيان الجذر وجميع حزم مساحة العمل الخاصة و`APP_VERSION`. يوفر Semantic-release هذه القيمة، ويقوم `pnpm version:sync <version>` بتحديث كل مساحة عمل قبل إصدار التطبيق.
+- OpenAPI `info.version` هو العقد العام المستقر API. تظل جميع المواصفات المترجمة على `<major>.0.0` لإصدارات التطبيقات المتوافقة وتتغير فقط عندما ينتقل عقد API إلى إصدار رئيسي جديد.
+- يحافظ `docker/feature-manifest.json` على `imageVersion: 2.0.0` باعتباره عصر تخزين حزمة الميزات القديمة غير القابلة للتغيير. مسارات أرشيف الإصدار 2 هذه ليست إصدارات حزمة التطبيقات. يستخدم Accurate OCR تنسيق وقت التشغيل v3 ويسجل مصدر إصدار التطبيق الخاص به بشكل منفصل.
+
+`tests/unit/infra/release-version-policy.test.ts` يفرض هذه الحدود. يجب أن يقوم مجال الإصدار الجديد أو الترحيل بتحديث هذا العقد وتصميم ترحيل العناصر ذات الصلة معًا.
+تعيش قيم API المستقلة والحزمة القديمة في `config/release-version-policy.json`؛ يجب ألا تقوم مزامنة إصدار التطبيق أبدًا بإعادة كتابة ملف السياسة هذا ضمنيًا.
 
 ## متغيرات البيئة {#environment-variables}
 
