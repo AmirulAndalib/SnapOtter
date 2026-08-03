@@ -19,7 +19,7 @@ import {
   isSafeMessageError,
   isToolInputError,
 } from "@snapotter/shared";
-import { analyticsEnabled } from "./analytics-gate.js";
+import { analyticsEnabled, sentryDiagnostic } from "./analytics-gate.js";
 
 export type ErrorClass = "expected" | "operational" | "bug";
 
@@ -74,6 +74,13 @@ export function classifyError(err: unknown, source?: ReportContext["source"]): E
   if (connectivityClass(err)) return "operational";
   if (isEnvironmentalDbError(err)) return "operational";
   if (e?.code && OPERATIONAL_CODES.has(e.code)) return "operational";
+  if (
+    e?.name === "ReplyError" &&
+    typeof e.message === "string" &&
+    /^(OOM|READONLY|MISCONF|NOREPLICAS)\b/.test(e.message)
+  ) {
+    return "operational";
+  }
   return "bug";
 }
 
@@ -105,7 +112,7 @@ export function errorSignature(err: unknown): string {
   let frame = "-";
   if (typeof e?.stack === "string") {
     const line = e.stack.split("\n").find((l) => l.includes("/apps/") || l.includes("/packages/"));
-    const m = line?.match(/([^/\\]+\.[cm]?[jt]sx?):(\d+)/);
+    const m = line?.slice(0, 300).match(/([^/\\\s():]+):(\d+)/);
     if (m) frame = `${m[1]}:${m[2]}`;
   }
   return `${name}:${code}:${frame}`;
@@ -155,7 +162,7 @@ export async function reportError(err: unknown, ctx: ReportContext): Promise<voi
     if (!analyticsEnabled()) return;
     const cls = classifyError(err, ctx.source);
     if (cls === "expected") return;
-    if (!shouldReport(cls, errorSignature(err))) return;
+    if (!sentryDiagnostic() && !shouldReport(cls, errorSignature(err))) return;
 
     const Sentry = await import("@sentry/node");
     const net = connectivityClass(err);
@@ -188,6 +195,10 @@ export async function reportError(err: unknown, ctx: ReportContext): Promise<voi
         // it is reproducible, without leaking filenames, free text, or secrets.
         const vetted = vetSettings(ctx.settings);
         if (vetted) scope.setContext("tool", vetted);
+      }
+      const py = err as { pythonType?: string; pythonFrames?: unknown };
+      if (Array.isArray(py.pythonFrames) && py.pythonFrames.length) {
+        scope.setContext("python", { type: py.pythonType, frames: py.pythonFrames });
       }
       Sentry.captureException(err instanceof Error ? err : new Error(String(err)));
     });

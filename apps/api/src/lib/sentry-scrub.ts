@@ -3,7 +3,7 @@
  * event ceiling. Kept pure (factory + injected gate) so it is unit-testable
  * without initializing the SDK. See the telemetry overhaul spec for the rules.
  */
-import { rebuildErrorValue } from "@snapotter/shared";
+import { rebuildErrorValue, redactMessage } from "@snapotter/shared";
 
 // Per-process runaway guard, not a quota lever: under the sponsored plan we want
 // real errors, but a single instance stuck in an error loop must not spam. Sentry
@@ -27,17 +27,6 @@ const TAG_ALLOWLIST = new Set([
   "instance_id",
 ]);
 
-const URL_RE = /https?:\/\/[^\s"')]+/g;
-const BLOB_RE = /blob:[^\s"')]+/g;
-// Absolute paths under roots that can hold user files (uploads live in /data,
-// /tmp) or dev machines (/Users, /home). Over-redaction of a benign path is fine.
-const PATH_RE = /(?:\/(?:Users|home|root|data|tmp|var|app|opt|mnt|srv)|[A-Za-z]:\\)[^\s"')]*/g;
-
-/** Redact urls, blob refs, and absolute paths from free text (breadcrumb messages). */
-function scrubText(s: string): string {
-  return s.replace(BLOB_RE, "<blob>").replace(URL_RE, "<url>").replace(PATH_RE, "<path>");
-}
-
 // Sentry event/hint are typed loosely on purpose: this module must not import
 // @sentry/node (instrument.ts loads the SDK lazily and passes events through).
 type AnyEvent = Record<string, unknown>;
@@ -60,7 +49,7 @@ function scrubBreadcrumb(entry: unknown): AnyEvent | null {
   for (const k of ["type", "category", "level", "timestamp"]) {
     if (b[k] !== undefined) out[k] = b[k];
   }
-  if (typeof b.message === "string") out.message = scrubText(b.message);
+  if (typeof b.message === "string") out.message = redactMessage(b.message);
   // For http breadcrumbs keep the non-PII status_code + method (the url is the
   // sensitive part, dropped with the rest of `data`): they answer "what request
   // failed right before the error".
@@ -135,7 +124,7 @@ function errorDigest(err: unknown): string {
   return (h >>> 0).toString(16);
 }
 
-export function buildBeforeSend(isActive: () => boolean) {
+export function buildBeforeSend(isActive: () => boolean, diagnostic = false) {
   let windowStart = 0;
   let sentInWindow = 0;
 
@@ -148,6 +137,20 @@ export function buildBeforeSend(isActive: () => boolean) {
       sentInWindow = 0;
     }
     if (++sentInWindow > CEILING_PER_HOUR) return null;
+
+    if (diagnostic) {
+      // A consenting instance: keep the raw message, request, and breadcrumb data.
+      // Still drop identity, and cap message length via redactMessage raw mode.
+      event.user = undefined;
+      const values = asObj(event.exception)?.values;
+      if (Array.isArray(values)) {
+        for (const entry of values) {
+          const ex = asObj(entry);
+          if (ex && typeof ex.value === "string") ex.value = redactMessage(ex.value, { raw: true });
+        }
+      }
+      return event;
+    }
 
     // Dropped: these surfaces can carry user data or PII.
     event.message = undefined;
@@ -175,6 +178,22 @@ export function buildBeforeSend(isActive: () => boolean) {
         else if (typeof v === "string" && v.length <= 32) safe[k] = v;
       }
       if (Object.keys(safe).length) keep.tool = safe;
+    }
+    const py = asObj(ctx?.python);
+    if (py) {
+      const type = typeof py.type === "string" ? py.type.slice(0, 64) : undefined;
+      const frames = Array.isArray(py.frames)
+        ? py.frames
+            .map((f) => asObj(f))
+            .filter((f): f is AnyEvent => !!f)
+            .map((f) => ({
+              file: typeof f.file === "string" ? f.file.slice(0, 64) : "?",
+              line: typeof f.line === "number" ? f.line : 0,
+              func: typeof f.func === "string" ? f.func.slice(0, 64) : "?",
+            }))
+            .slice(0, 20)
+        : [];
+      if (frames.length) keep.python = { type, frames };
     }
     event.contexts = Object.keys(keep).length ? keep : undefined;
 

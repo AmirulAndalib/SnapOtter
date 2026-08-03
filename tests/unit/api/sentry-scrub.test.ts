@@ -40,6 +40,18 @@ describe("buildBeforeSend (api)", () => {
   it("returns null when the gate is off", () => {
     expect(buildBeforeSend(() => false)(evt(), {})).toBeNull();
   });
+  it("keeps the raw message and request when diagnostic is on", () => {
+    const diag = buildBeforeSend(() => true, true);
+    const event = {
+      exception: { values: [{ type: "Error", value: "open /data/uploads/a/report.pdf" }] },
+      request: { method: "POST", url: "https://host/api/v1/tools/image/rounded-crop" },
+    };
+    const out = diag(event as never, {
+      originalException: new Error("open /data/uploads/a/report.pdf"),
+    }) as never as { exception: { values: Array<{ value: string }> }; request?: unknown };
+    expect(out.exception.values[0].value).toBe("open /data/uploads/a/report.pdf");
+    expect(out.request).toBeDefined();
+  });
   it("strips high-risk surfaces but keeps full stack paths for debugging", () => {
     const hint = {
       originalException: Object.assign(new Error("x"), { code: "EACCES", syscall: "mkdir" }),
@@ -78,9 +90,9 @@ describe("buildBeforeSend (api)", () => {
       { message: "reading <path>", category: "console", level: "info" },
     ]);
   });
-  it("falls back to type-only for unknown errors", () => {
+  it("keeps a redacted message for unknown errors", () => {
     const out = send(evt(), { originalException: new Error("user path /tmp/z") })!;
-    expect(out.exception.values[0].value).toBe("Error");
+    expect(out.exception.values[0].value).toBe("user path <path>");
   });
   it("applies the rebuilt value to the last (original) exception entry only", () => {
     const event = evt({
@@ -124,6 +136,25 @@ describe("buildBeforeSend (api)", () => {
   it("drops contexts entirely when nothing allowlisted survives", () => {
     const out = send(evt({ contexts: { device: { hostname: "leak" } } }), {})!;
     expect(out.contexts).toBeUndefined();
+  });
+  it("keeps a vetted python context and drops overlong fields", () => {
+    const event = {
+      ...evt(),
+      contexts: {
+        python: {
+          type: "RuntimeError",
+          frames: [
+            { file: "remove_bg.py", line: 88, func: "run" },
+            { file: "x".repeat(200), line: 1, func: "y".repeat(200) },
+          ],
+        },
+      },
+    };
+    const out = send(event, { originalException: new Error("x") })!;
+    expect(out.contexts.python.type).toBe("RuntimeError");
+    expect(out.contexts.python.frames).toHaveLength(2);
+    expect(out.contexts.python.frames[1].file.length).toBeLessThanOrEqual(64);
+    expect(out.contexts.python.frames[1].func.length).toBeLessThanOrEqual(64);
   });
   it("enforces the 500-events-per-hour ceiling", () => {
     for (let i = 0; i < 500; i++) expect(send(evt(), {})).not.toBeNull();
