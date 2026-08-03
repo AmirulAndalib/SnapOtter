@@ -49,7 +49,7 @@ import { formatFileSize } from "@/lib/download";
 import { classifyFeedbackError } from "@/lib/feedback";
 import { format } from "@/lib/format";
 import { ICON_MAP } from "@/lib/icon-map";
-import { MULTI_FILE_TOOLS } from "@/lib/tool-display-modes";
+import { LIVE_PREVIEW_INPUT_OVERLAY_TOOLS, MULTI_FILE_TOOLS } from "@/lib/tool-display-modes";
 import { getToolName } from "@/lib/tool-i18n";
 import { getToolRegistryEntry } from "@/lib/tool-registry";
 import { useBase64Store } from "@/stores/base64-store";
@@ -904,24 +904,26 @@ export function ToolPage() {
       }
     }
 
+    const conversionCompleteCard = (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center p-8 max-w-xs">
+          <div className="mx-auto w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 flex items-center justify-center mb-4">
+            <CheckCircle2 className="h-8 w-8 text-success-ink" />
+          </div>
+          <p className="font-medium text-foreground mb-1">{t.toolPage.conversionComplete}</p>
+          <p className="text-sm text-muted-foreground mb-1">{processedFileName}</p>
+          {processedSize != null && (
+            <p className="text-xs text-muted-foreground">
+              {processedFileType} &middot; {formatFileSize(processedSize)}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+
     // Non-previewable format with no fallback at all - show success card
     if (hasProcessed && !isProcessedPreviewable && !processedPreviewUrl && !originalBlobUrl) {
-      return (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center p-8 max-w-xs">
-            <div className="mx-auto w-16 h-16 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 flex items-center justify-center mb-4">
-              <CheckCircle2 className="h-8 w-8 text-success-ink" />
-            </div>
-            <p className="font-medium text-foreground mb-1">{t.toolPage.conversionComplete}</p>
-            <p className="text-sm text-muted-foreground mb-1">{processedFileName}</p>
-            {processedSize != null && (
-              <p className="text-xs text-muted-foreground">
-                {processedFileType} &middot; {formatFileSize(processedSize)}
-              </p>
-            )}
-          </div>
-        </div>
-      );
+      return conversionCompleteCard;
     }
 
     if (
@@ -946,8 +948,31 @@ export function ToolPage() {
     }
 
     // For live-preview tools: keep showing the CSS-styled original so WYSIWYG.
-    // The server-rendered result is available via download.
+    // The server-rendered result is available via download. Tools whose
+    // overlay is an input control (pixelate's selection box) get the opposite
+    // treatment: the style simulates nothing, so show the server result and
+    // keep the overlay on top for the next region (#713).
     if (hasProcessed && originalBlobUrl && displayMode === "live-preview" && imageWrapperStyle) {
+      const overlayIsInput = toolId ? LIVE_PREVIEW_INPUT_OVERLAY_TOOLS.has(toolId) : false;
+      if (overlayIsInput) {
+        // Never substitute the original for the result here: pixelate
+        // redacts, and a missing result preview rendered as the untouched
+        // original would show unredacted content under the processed
+        // filename. Without a renderable result, show the success card.
+        const resultSrc = processedPreviewUrl ?? (isProcessedPreviewable ? processedUrl : null);
+        if (!resultSrc) {
+          return conversionCompleteCard;
+        }
+        return (
+          <ImageViewer
+            src={resultSrc}
+            filename={processedFileName}
+            fileSize={processedSize ?? 0}
+            imageWrapperStyle={imageWrapperStyle}
+            imageWrapperChildren={imageWrapperChildren}
+          />
+        );
+      }
       return (
         <ImageViewer
           src={originalBlobUrl}
