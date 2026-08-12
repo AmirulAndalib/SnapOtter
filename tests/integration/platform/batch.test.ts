@@ -48,6 +48,21 @@ const storageMock = vi.hoisted(() => ({
   poison: new Map<string, "reject" | "stream-error">(),
 }));
 
+// Simulates the 30-minute sync wait expiring for a specific parent id: the
+// real window cannot be reached organically in a test (#750).
+const enqueueMock = vi.hoisted(() => ({ timeoutParentIds: new Set<string>() }));
+
+vi.mock("../../../apps/api/src/jobs/enqueue.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../apps/api/src/jobs/enqueue.js")>();
+  return {
+    ...actual,
+    waitForJob: async (...args: Parameters<typeof actual.waitForJob>) => {
+      if (enqueueMock.timeoutParentIds.has(args[1])) return null;
+      return actual.waitForJob(...args);
+    },
+  };
+});
+
 vi.mock("../../../apps/api/src/lib/ocr-limits.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../apps/api/src/lib/ocr-limits.js")>();
   return {
@@ -122,6 +137,21 @@ const heicMetadataReadable = await sharp(HEIC)
 let testApp: TestApp;
 let app: TestApp["app"];
 let adminToken: string;
+
+/** Poll the Redis terminal replay key until the terminal frame appears. */
+async function waitForTerminalFrame(
+  jobId: string,
+  timeoutMs = 30_000,
+): Promise<Record<string, unknown>> {
+  const key = `${bullPrefix()}:terminal:${jobId}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const raw = await sharedRedis().get(key);
+    if (raw) return JSON.parse(raw) as Record<string, unknown>;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`No terminal frame for ${jobId} within ${timeoutMs}ms`);
+}
 
 beforeAll(async () => {
   testApp = await buildTestApp();
@@ -704,6 +734,52 @@ describe("Legacy batch SSE wire parity", () => {
     expect(parsed.failedFiles).toBe(1);
     expect(parsed.status).toBe("completed");
     expect(parsed.type).toBe("batch");
+
+    // #750: the terminal frame carries the durable result so a client that
+    // lost the HTTP response can settle from SSE alone. fileResults maps
+    // ORIGINAL upload indices (the invalid slot 1 is absent, not shifted).
+    expect(parsed.result).toBeDefined();
+    expect(typeof parsed.result.downloadUrl).toBe("string");
+    expect(parsed.result.fileResults["0"]).toContain("good1");
+    expect(parsed.result.fileResults["1"]).toBeUndefined();
+    expect(parsed.result.fileResults["2"]).toContain("good2");
+    expect(parsed.result.fileResults).toEqual(
+      JSON.parse(decodeURIComponent(res.headers["x-file-results"] as string)),
+    );
+
+    // The durable ZIP is byte-identical to the one the HTTP response streamed.
+    const download = await app.inject({
+      method: "GET",
+      url: parsed.result.downloadUrl,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.rawPayload.equals(res.rawPayload)).toBe(true);
+
+    // The parent row replays the same terminal result after the Redis
+    // terminal key expires (simulated by deleting it).
+    await sharedRedis().del(terminalKeyName);
+    const sse = await app.inject({
+      method: "GET",
+      url: `/api/v1/jobs/${clientJobId}/progress`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payloadAsStream: true,
+    });
+    let replayed: Record<string, unknown> | null = null;
+    for await (const chunk of sse.stream()) {
+      const text = Buffer.from(chunk).toString();
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const data = JSON.parse(line.slice(6));
+        if (data.type === "batch") replayed = data;
+      }
+      if (replayed) break;
+    }
+    expect(replayed).not.toBeNull();
+    expect(replayed?.status).toBe("completed");
+    expect((replayed?.result as Record<string, unknown>)?.downloadUrl).toBe(
+      parsed.result.downloadUrl,
+    );
   });
 });
 
@@ -951,6 +1027,127 @@ describe("HEIC batch ingress", () => {
   );
 });
 
+// ── Sync-wait expiry answers the async contract (#750) ──────────
+describe("Sync-wait expiry", () => {
+  it("answers 202 and the batch still completes durably", async () => {
+    const clientJobId = randomUUID();
+    enqueueMock.timeoutParentIds.add(clientJobId);
+    try {
+      const { body, contentType } = createMultipartPayload([
+        { name: "file", filename: "a.png", contentType: "image/png", content: PNG },
+        { name: "file", filename: "b.jpg", contentType: "image/jpeg", content: JPG },
+        { name: "settings", content: JSON.stringify({ width: 50 }) },
+        { name: "clientJobId", content: clientJobId },
+      ]);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/tools/image/resize/batch",
+        headers: { "content-type": contentType, authorization: `Bearer ${adminToken}` },
+        body,
+      });
+
+      expect(res.statusCode).toBe(202);
+      expect(JSON.parse(res.body)).toEqual({ jobId: clientJobId, async: true });
+
+      // The flow does not care about the response: the finalize still
+      // persists the ZIP and publishes the terminal frame the client
+      // rides to.
+      const frame = await waitForTerminalFrame(clientJobId);
+      expect(frame.status).toBe("completed");
+      const result = frame.result as Record<string, unknown>;
+      const download = await app.inject({
+        method: "GET",
+        url: String(result.downloadUrl),
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+      expect(download.statusCode).toBe(200);
+      expect(new AdmZip(download.rawPayload).getEntries()).toHaveLength(2);
+    } finally {
+      enqueueMock.timeoutParentIds.delete(clientJobId);
+    }
+  }, 60_000);
+});
+
+// ── ZIP packaging failure fails clean, before headers (#750) ────
+describe("ZIP packaging failure", () => {
+  it("fails with an error status and a durable failed frame when a child output stream dies mid-read", async () => {
+    const clientJobId = randomUUID();
+    // Poison only the child outputs (outputs/<id>-fN/...), not the stored
+    // ZIP: the finalize's packaging pass must fail before the route ever
+    // commits a status. The stream errors on read, after opening, which is
+    // the case a try/catch around getObjectStream cannot see.
+    storageMock.poison.set(`outputs/${clientJobId}-f`, "stream-error");
+    try {
+      const { body, contentType } = createMultipartPayload([
+        { name: "file", filename: "a.png", contentType: "image/png", content: PNG },
+        { name: "file", filename: "b.jpg", contentType: "image/jpeg", content: JPG },
+        { name: "settings", content: JSON.stringify({ width: 50 }) },
+        { name: "clientJobId", content: clientJobId },
+      ]);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/tools/image/resize/batch",
+        headers: { "content-type": contentType, authorization: `Bearer ${adminToken}` },
+        body,
+      });
+
+      expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      expect(res.headers["content-type"]).toContain("application/json");
+
+      // The failure is durable: a degraded client settles from this frame.
+      const frame = await waitForTerminalFrame(clientJobId);
+      expect(frame.status).toBe("failed");
+      const errors = (frame.errors ?? []) as Array<{ filename: string; error: string }>;
+      expect(errors.some((e) => e.error === "Failed to package batch results")).toBe(true);
+    } finally {
+      storageMock.poison.clear();
+    }
+  }, 60_000);
+});
+
+// ── All files fail ingress validation (#750) ────────────────────
+describe("Batch where every file fails validation", () => {
+  it("publishes a terminal failed frame alongside the 422", async () => {
+    const clientJobId = randomUUID();
+    const { body, contentType } = createMultipartPayload([
+      {
+        name: "file",
+        filename: "one.png",
+        contentType: "image/png",
+        content: Buffer.from("not an image"),
+      },
+      {
+        name: "file",
+        filename: "two.jpg",
+        contentType: "image/jpeg",
+        content: Buffer.from("also not an image"),
+      },
+      { name: "settings", content: JSON.stringify({ width: 50 }) },
+      { name: "clientJobId", content: clientJobId },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/tools/image/resize/batch",
+      headers: { "content-type": contentType, authorization: `Bearer ${adminToken}` },
+      body,
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body).error).toBe("All files failed processing");
+
+    // No flow exists, so no finalize will ever publish a terminal frame;
+    // the route publishes it, or a degraded client waits forever.
+    const frame = await waitForTerminalFrame(clientJobId, 10_000);
+    expect(frame.status).toBe("failed");
+    expect(frame.totalFiles).toBe(2);
+    expect(frame.failedFiles).toBe(2);
+    const errors = (frame.errors ?? []) as Array<{ filename: string; error: string }>;
+    expect(errors).toHaveLength(2);
+    expect(errors[0].filename).toBe("one.png");
+  }, 30_000);
+});
+
 // ── CLI-decode fallback + all-children-failed ───────────────────
 describe("Batch where every worker job fails", () => {
   it("returns 422 with per-file errors when all enqueued children fail", async () => {
@@ -966,6 +1163,7 @@ describe("Batch where every worker job fails", () => {
       Buffer.alloc(64, 0xab),
     ]);
 
+    const clientJobId = randomUUID();
     const { body, contentType } = createMultipartPayload([
       {
         name: "file",
@@ -974,6 +1172,7 @@ describe("Batch where every worker job fails", () => {
         content: garbageQoi,
       },
       { name: "settings", content: JSON.stringify({ width: 50 }) },
+      { name: "clientJobId", content: clientJobId },
     ]);
 
     const res = await app.inject({
@@ -991,6 +1190,15 @@ describe("Batch where every worker job fails", () => {
     expect(String(result.errors[0].filename)).toMatch(/garbage/);
     expect(typeof result.errors[0].error).toBe("string");
     expect(result.errors[0].error.length).toBeGreaterThan(0);
+
+    // The finalize publishes the same outcome as a terminal failed frame,
+    // which is what a degraded client displays (#750).
+    const frame = await waitForTerminalFrame(clientJobId, 15_000);
+    expect(frame.status).toBe("failed");
+    expect(frame.failedFiles).toBe(1);
+    const frameErrors = (frame.errors ?? []) as Array<{ filename: string; error: string }>;
+    expect(frameErrors.length).toBeGreaterThan(0);
+    expect(String(frameErrors[0].filename)).toMatch(/garbage/);
   }, 60_000);
 });
 
