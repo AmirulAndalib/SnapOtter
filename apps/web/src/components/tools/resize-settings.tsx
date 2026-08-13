@@ -1,6 +1,7 @@
 import { SOCIAL_MEDIA_PRESETS } from "@snapotter/shared";
-import { Download, Info } from "lucide-react";
+import { Download } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { HintIcon } from "@/components/common/hint-icon";
 import { ProgressCard } from "@/components/common/progress-card";
 import { useTranslation } from "@/contexts/i18n-context";
 import { useToolProcessor } from "@/hooks/use-tool-processor";
@@ -15,17 +16,6 @@ const FIT_MODES: FitMode[] = ["cover", "contain", "fill"];
 
 // Group presets by platform
 const platforms = [...new Set(SOCIAL_MEDIA_PRESETS.map((p) => p.platform))];
-
-function HintIcon({ text }: { text: string }) {
-  return (
-    <span className="relative group">
-      <Info className="h-3 w-3 text-muted-foreground" />
-      <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-48 rounded bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background opacity-0 transition-opacity group-hover:opacity-100 z-10">
-        {text}
-      </span>
-    </span>
-  );
-}
 
 export interface ResizeControlsProps {
   settings?: Record<string, unknown>;
@@ -219,17 +209,21 @@ export function ResizeControls({ settings: initialSettings, onChange }: ResizeCo
     </div>
   );
 
+  // HintIcon is a button now, so it sits beside the label, not inside it
+  // (labels must not contain other interactive elements).
   const enlargementCheckbox = (
-    <label className="flex items-center gap-1.5 text-xs text-foreground">
-      <input
-        type="checkbox"
-        checked={withoutEnlargement}
-        onChange={(e) => setWithoutEnlargement(e.target.checked)}
-        className="rounded"
-      />
-      <span>{t.toolSettings.resize.limitToOriginalSize}</span>
+    <div className="flex items-center gap-1.5">
+      <label className="flex items-center gap-1.5 text-xs text-foreground">
+        <input
+          type="checkbox"
+          checked={withoutEnlargement}
+          onChange={(e) => setWithoutEnlargement(e.target.checked)}
+          className="rounded"
+        />
+        <span>{t.toolSettings.resize.limitToOriginalSize}</span>
+      </label>
       <HintIcon text={t.toolSettings.resize.limitToOriginalSizeHint} />
-    </label>
+    </div>
   );
 
   return (
