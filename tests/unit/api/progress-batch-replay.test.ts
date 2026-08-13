@@ -271,6 +271,58 @@ describe("buildBatchReplayEvent", () => {
     });
   });
 
+  it("replays a canceled row with a durable result as completed-with-result (#767)", () => {
+    const result = {
+      downloadUrl: "/api/v1/download/b/batch-resize-b.zip",
+      fileResults: { "0": "a.png" },
+    };
+    expect(
+      buildBatchReplayEvent({
+        jobId: "batch-canceled-partial",
+        status: "canceled",
+        progress: { percent: 100, totalFiles: 3, completedFiles: 3, failedFiles: 2, result },
+        error: { message: "Canceled", details: [{ filename: "b.png", error: "Canceled" }] },
+      }),
+    ).toEqual({
+      jobId: "batch-canceled-partial",
+      type: "batch",
+      status: "completed",
+      totalFiles: 3,
+      completedFiles: 3,
+      failedFiles: 2,
+      errors: [{ filename: "b.png", error: "Canceled" }],
+      result,
+    });
+  });
+
+  it("replays a resultless canceled row as failed with its stored details (#767)", () => {
+    expect(
+      buildBatchReplayEvent({
+        jobId: "batch-canceled-full",
+        status: "canceled",
+        progress: { percent: 100, totalFiles: 2, completedFiles: 2, failedFiles: 2 },
+        error: {
+          message: "Canceled",
+          details: [
+            { filename: "", error: "Canceled" },
+            { filename: "a.png", error: "Canceled" },
+          ],
+        },
+      }),
+    ).toEqual({
+      jobId: "batch-canceled-full",
+      type: "batch",
+      status: "failed",
+      totalFiles: 2,
+      completedFiles: 2,
+      failedFiles: 2,
+      errors: [
+        { filename: "", error: "Canceled" },
+        { filename: "a.png", error: "Canceled" },
+      ],
+    });
+  });
+
   it("tolerates legacy rows whose progress has only a percent", () => {
     expect(
       buildBatchReplayEvent({

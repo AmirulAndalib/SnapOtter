@@ -120,8 +120,16 @@ export function useToolProcessor(toolId: string) {
   // (#722, #750).
   const sawJobEvidenceRef = useRef(false);
   // Installed by processAllFiles so the SSE handler can settle a degraded
-  // batch run from its terminal frame (#750). Null outside batch runs.
-  const batchRunRef = useRef<{ onTerminal: (frame: BatchProgressFrame) => void } | null>(null);
+  // batch run from its terminal frame (#750) and the cancel path can record
+  // intent or settle a run the server never saw (#767). Null outside batch
+  // runs. cancelLocally reports whether it acted: a stale closure from an
+  // already-settled run refuses, and the caller must fall through to the
+  // single-run settle instead of treating the cancel as handled.
+  const batchRunRef = useRef<{
+    onTerminal: (frame: BatchProgressFrame) => void;
+    markCanceled: () => void;
+    cancelLocally: () => boolean;
+  } | null>(null);
 
   const isAiTool = AI_PYTHON_TOOLS.has(toolId);
   const toolName = TOOLS.find((t) => t.id === toolId)?.name ?? toolId;
@@ -184,6 +192,9 @@ export function useToolProcessor(toolId: string) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
+      // This teardown ends whatever run armed it; a batch closure left
+      // behind would swallow a later run's cancel-404 settle (#767).
+      batchRunRef.current = null;
       clearActiveJob();
       setError(
         "Processing was interrupted and the server never confirmed the job. Retry when reconnected.",
@@ -201,11 +212,26 @@ export function useToolProcessor(toolId: string) {
         method: "POST",
         headers: formatHeaders(),
       });
+      // Record intent only once the server acknowledged the cancel: a failed
+      // or refused POST must not repaint the run's real outcome as canceled
+      // (#767). The ack always precedes the terminal frame (the finalize
+      // still has children to drain), so labeling cannot race it.
+      if (res.ok) {
+        const body = (await res.json().catch(() => null)) as { canceled?: boolean } | null;
+        if (body?.canceled === true && activeJobIdRef.current === jobId) {
+          batchRunRef.current?.markCanceled();
+        }
+      }
       // 404 means no job exists server-side (possible in the degraded #722
       // state when the request tail never arrived). Nothing will ever emit a
       // frame, so settle locally as canceled instead of blaming the network
       // 30 seconds later.
       if (res.status === 404 && activeJobIdRef.current === jobId) {
+        // A batch upload may still be in flight; its settle path also has to
+        // abort the XHR and tear down the run's own state (#767). A refusal
+        // means the closure belongs to an earlier run: fall through and
+        // settle the live run the single-run way.
+        if (batchRunRef.current?.cancelLocally()) return;
         clearJobEvidenceTimer();
         clearStallTimer();
         if (elapsedRef.current) clearInterval(elapsedRef.current);
@@ -704,7 +730,7 @@ export function useToolProcessor(toolId: string) {
 
       // batch_processed fires once for the batch as a unit (distinct from the N
       // per-file tool_used events), so batch usage is separable from single runs.
-      const trackBatch = (status: "completed" | "failed") =>
+      const trackBatch = (status: "completed" | "failed" | "canceled") =>
         void import("@/lib/analytics").then(({ track }) =>
           track(ANALYTICS_EVENTS.BATCH_PROCESSED, {
             tool_id: toolId,
@@ -712,6 +738,11 @@ export function useToolProcessor(toolId: string) {
             status,
           }),
         );
+
+      // Set on the user's cancel click; drives outcome labeling and the
+      // batch_processed status. The server keeps its own truth in the row
+      // status; this flag only shapes what this client shows (#767).
+      let canceledByUser = false;
 
       const { updateEntry, setBatchZip } = useFileStore.getState();
 
@@ -735,6 +766,12 @@ export function useToolProcessor(toolId: string) {
       activeJobIdRef.current = clientJobId;
       activeEntryIndexRef.current = null;
       asyncModeRef.current = false;
+      // The cancel button lives behind the store's activeJob handle. Batch
+      // runs arm it for the whole run, sync wait included: since #750 the
+      // HTTP response is only an observer, so without this the only exit
+      // from a long unwanted batch was closing the tab, which stopped
+      // nothing server-side (#767).
+      setActiveJob(clientJobId, cancelCurrentJob);
 
       // Tear down the run without touching the outcome state; callers set
       // the result or error first.
@@ -755,7 +792,7 @@ export function useToolProcessor(toolId: string) {
       const failRun = (message: string) => {
         setError(message);
         finishRun();
-        trackBatch("failed");
+        trackBatch(canceledByUser ? "canceled" : "failed");
       };
 
       const settleFromZip = async (zipBlob: Blob, fileResults: Record<string, string>) => {
@@ -784,12 +821,17 @@ export function useToolProcessor(toolId: string) {
               error: null,
             });
           } else {
-            updateEntry(i, { status: "failed", error: "File not found in batch results" });
+            // After a user cancel, a missing result is the cancel doing its
+            // job, not a lookup failure.
+            updateEntry(i, {
+              status: "failed",
+              error: canceledByUser ? "Canceled" : "File not found in batch results",
+            });
           }
         }
 
         finishRun();
-        trackBatch("completed");
+        trackBatch(canceledByUser ? "canceled" : "completed");
       };
 
       // A degraded run settles here: download the durable ZIP the terminal
@@ -830,6 +872,18 @@ export function useToolProcessor(toolId: string) {
       };
 
       batchRunRef.current = {
+        markCanceled: () => {
+          canceledByUser = true;
+        },
+        cancelLocally: () => {
+          if (activeJobIdRef.current !== clientJobId) return false;
+          canceledByUser = true;
+          // The upload may still be in flight; aborting it is what actually
+          // stops ingress when no job row exists server-side yet.
+          xhrRef.current?.abort();
+          failRun("Canceled");
+          return true;
+        },
         onTerminal: (frame) => {
           if (activeJobIdRef.current !== clientJobId) return;
           if (
@@ -959,8 +1013,14 @@ export function useToolProcessor(toolId: string) {
           }
           if (activeJobIdRef.current !== clientJobId) return;
           let errorMsg: string;
+          let serverCanceled = false;
           try {
             const body = JSON.parse(text);
+            // The route marks a fully canceled batch structurally; only that
+            // settles as a cancellation. A real failure after a cancel click
+            // (the cancel lost the race, a 500) keeps its own message
+            // instead of being repainted as "Canceled".
+            serverCanceled = (body as { canceled?: boolean } | null)?.canceled === true;
             const parsed = parseApiError(body, xhr.status);
             if (typeof parsed === "object" && parsed.type === "feature_not_installed") {
               errorMsg = `${toolName} requires the "${parsed.featureName}" feature. Enable it in Settings → AI Features.`;
@@ -978,7 +1038,9 @@ export function useToolProcessor(toolId: string) {
             }
             errorMsg = `Batch processing failed: ${xhr.status}`;
           }
-          failRun(errorMsg);
+          // "Canceled" (not the route's message) so the existing i18n
+          // mapping renders it localized.
+          failRun(serverCanceled ? "Canceled" : errorMsg);
         })();
       };
 
@@ -1007,6 +1069,8 @@ export function useToolProcessor(toolId: string) {
       processFiles,
       setProcessing,
       setError,
+      setActiveJob,
+      cancelCurrentJob,
       clearActiveJob,
       clearJobEvidenceTimer,
       clearStallTimer,
