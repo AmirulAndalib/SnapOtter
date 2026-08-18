@@ -8,6 +8,7 @@ import { env } from "../config.js";
 import { db, schema } from "../db/index.js";
 import { sharedRedis } from "../jobs/connection.js";
 import { auditFromRequest } from "../lib/audit.js";
+import { reportError } from "../lib/error-report.js";
 import {
   findUniqueUsername,
   resolveExternalUser,
@@ -17,6 +18,7 @@ import { authAttempts } from "../lib/metrics.js";
 import { makeRedisSamlCacheProvider } from "../lib/saml-cache.js";
 import { isSecureRequest } from "../lib/secure-cookie.js";
 import { createSessionToken } from "./auth.js";
+import type { ExternalMfaOutcome, MfaPolicy } from "./mfa.js";
 
 // -- SAML instance factory ----------------------------------------------------
 
@@ -200,17 +202,53 @@ export async function registerSaml(app: FastifyInstance): Promise<void> {
         return redirectToLogin(reply, "saml_auth_failed");
       }
 
-      let mfaOutcome: "proceed" | "challenge" | "enrollment_required" = "proceed";
+      // Two failures used to share one silent catch here and they want
+      // opposite defaults (#815). A missing MFA module keeps the login
+      // policy-free (an enrolled user still gets the challenge below). A
+      // loaded module whose policy READ fails maps to the "unavailable"
+      // sentinel instead: the stored policy may well be "required", so
+      // unenrolled users fail closed rather than silently skipping the
+      // policy.
+      const totpEnabled = dbUser?.totpEnabled ?? false;
+      let mfaOutcome: ExternalMfaOutcome = totpEnabled ? "challenge" : "proceed";
+      let mfaModule: typeof import("./mfa.js") | undefined;
       try {
-        const { getMfaPolicy, resolveExternalLoginMfaOutcome } = await import("./mfa.js");
-        const policy = await getMfaPolicy();
-        mfaOutcome = resolveExternalLoginMfaOutcome(
+        mfaModule = await import("./mfa.js");
+      } catch (err) {
+        // Unreachable today: index.ts imports mfa.js statically at boot, so a
+        // broken module means the server never started. Kept as a guard for a
+        // future conditional registration; if it ever fires, logins proceed
+        // policy-free, which must never be silent.
+        request.log.error(
+          { err },
+          "SAML callback: MFA module failed to load; proceeding without policy",
+        );
+      }
+      if (mfaModule) {
+        let policy: MfaPolicy | "unavailable" = "unavailable";
+        try {
+          policy = await mfaModule.getMfaPolicy();
+        } catch (err) {
+          request.log.error(
+            { err, userId: resolvedUser.id },
+            "SAML callback: failed to read the MFA policy",
+          );
+          // request.log has no Sentry bridge, and by catching here the error
+          // never reaches the global handler's reportError. Report explicitly
+          // so a settings fault denying logins is visible in triage.
+          void reportError(err, {
+            source: "http",
+            route: request.routeOptions?.url,
+            method: request.method,
+            statusCode: 503,
+            subsystem: "mfa-policy",
+          });
+        }
+        mfaOutcome = mfaModule.resolveExternalLoginMfaOutcome(
           policy,
           resolvedUser.role,
-          dbUser?.totpEnabled ?? false,
+          totpEnabled,
         );
-      } catch {
-        // MFA plugin not loaded
       }
 
       if (mfaOutcome === "challenge") {
@@ -232,6 +270,20 @@ export async function registerSaml(app: FastifyInstance): Promise<void> {
           reason: "mfa_enrollment_required",
         });
         return redirectToLogin(reply, "mfa_enrollment_required");
+      }
+
+      if (mfaOutcome !== "proceed") {
+        // "policy_unavailable" today, and by construction any future outcome
+        // variant nobody wires up here: only an explicit "proceed" reaches
+        // session creation, so drift fails closed instead of recreating
+        // #815's fail-open.
+        authAttempts.inc({ method: "saml", result: "failure" });
+        await audit("SAML_LOGIN_FAILED", {
+          userId: resolvedUser.id,
+          username: resolvedUser.username,
+          reason: "mfa_policy_unavailable",
+        });
+        return redirectToLogin(reply, "mfa_policy_unavailable");
       }
 
       // Create session (same pattern as OIDC)
