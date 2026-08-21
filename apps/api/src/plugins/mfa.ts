@@ -8,6 +8,7 @@ import { db, schema } from "../db/index.js";
 import { sharedRedis } from "../jobs/connection.js";
 import { auditFromRequest } from "../lib/audit.js";
 import { decrypt, encrypt } from "../lib/encryption.js";
+import { isEnterpriseFeatureEnabled } from "../lib/enterprise-feature.js";
 import { logger } from "../lib/logger.js";
 import { clearUserMfa } from "../lib/user-mfa.js";
 import {
@@ -205,13 +206,7 @@ export async function beginForcedEnrollment(user: {
   id: string;
   username: string;
 }): Promise<{ enrollmentToken: string; uri: string; recoveryCodes: string[] } | null> {
-  let mfaLicensed = false;
-  try {
-    const { isFeatureEnabled } = await import("@snapotter/enterprise");
-    mfaLicensed = isFeatureEnabled("mfa");
-  } catch {
-    // Enterprise package not available.
-  }
+  const mfaLicensed = await isEnterpriseFeatureEnabled("mfa");
   if (!mfaLicensed) return null;
 
   const totp = createTotp(user.username);
@@ -245,13 +240,7 @@ export async function registerMfa(app: FastifyInstance): Promise<void> {
       if (!user) return;
 
       // Check enterprise feature gate
-      let mfaLicensed = false;
-      try {
-        const { isFeatureEnabled } = await import("@snapotter/enterprise");
-        mfaLicensed = isFeatureEnabled("mfa");
-      } catch {
-        // Enterprise package not available
-      }
+      const mfaLicensed = await isEnterpriseFeatureEnabled("mfa");
 
       if (!mfaLicensed) {
         return reply.status(403).send({
