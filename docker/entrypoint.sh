@@ -65,7 +65,12 @@ if [ "$RUN_MODE" = "embedded" ]; then
   embedded_requires_root "$(id -u)" || exit 1
   EMBEDDED_MODE=1
   export EMBEDDED_MODE
-  export DATABASE_URL="postgres://snapotter:snapotter@127.0.0.1:5432/snapotter"
+  # Same split as the Compose stack: requests are served by the DML-only
+  # snapotter_app role, and only the short-lived boot connection uses the
+  # database owner. Both roles are created by the first-boot bootstrap; on a data
+  # dir from before the split the app creates snapotter_app itself at boot.
+  export DATABASE_URL="postgres://snapotter_app:snapotter_app@127.0.0.1:5432/snapotter"
+  export DATABASE_MIGRATION_URL="postgres://snapotter:snapotter@127.0.0.1:5432/snapotter"
   export REDIS_URL="redis://127.0.0.1:6379"
   # 1.x single-container upgrade: auto-import /data/snapotter.db on first boot
   # unless the operator set an explicit path. Importer no-ops on a non-empty DB.
@@ -158,8 +163,13 @@ print_security_warnings() {
   # Embedded Postgres/Redis are loopback-only and never network-exposed, so the
   # default-credential warnings below only apply to external (Compose) mode.
   if [ -z "${EMBEDDED_MODE:-}" ]; then
-    if echo "${DATABASE_URL:-}" | grep -q "snapotter:snapotter@"; then
-      printf '  \033[33mWARNING:%b Default Postgres credentials in use. Set POSTGRES_PASSWORD for production.\n' '\033[0m' >&2
+    # Both URLs, because the Compose stack now splits them: DATABASE_URL carries
+    # the runtime role (POSTGRES_APP_*) and DATABASE_MIGRATION_URL the owner
+    # (POSTGRES_*). Checking only the first would let a default owner password
+    # ship unwarned.
+    if printf '%s\n%s\n' "${DATABASE_URL:-}" "${DATABASE_MIGRATION_URL:-}" |
+      grep -qE "snapotter:snapotter@|snapotter_app:snapotter_app@"; then
+      printf '  \033[33mWARNING:%b Default Postgres credentials in use. Set POSTGRES_PASSWORD and POSTGRES_APP_PASSWORD for production.\n' '\033[0m' >&2
     fi
     if echo "${REDIS_URL:-}" | grep -q ":snapotter@"; then
       printf '  \033[33mWARNING:%b Default Redis password in use. Set REDIS_PASSWORD for production.\n' '\033[0m' >&2
