@@ -145,6 +145,47 @@ describe("getStoredFilePath", () => {
   });
 });
 
+// Regression guard for #899: createReadStream defers the open, so a missing
+// blob used to surface as an async "error" event after the caller's try/catch
+// had already exited (the download route then 500ed instead of 404ing). The
+// local branch must reject the promise itself so callers can catch it.
+describe("streamStoredFile", () => {
+  it("rejects with ENOENT when the stored file is missing", async () => {
+    const { streamStoredFile } = await importModule();
+    const err = (await streamStoredFile("00000000-dead-beef-0000-000000000000.png").then(
+      () => null,
+      (e: unknown) => e,
+    )) as NodeJS.ErrnoException | null;
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.code).toBe("ENOENT");
+  });
+
+  it("streams back a saved file", async () => {
+    const { saveFile, streamStoredFile } = await importModule();
+    const name = await saveFile(Buffer.from("stream me"), "photo.png");
+    const stream = await streamStoredFile(name);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(chunk as Buffer);
+    expect(Buffer.concat(chunks).toString()).toBe("stream me");
+  });
+
+  // A blob that exists but can't be opened must also reject up front, so the
+  // download route can tell a storage fault (rethrow, 500) from a missing
+  // blob (404) instead of the EACCES escaping as an async stream error.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  it.skipIf(isRoot)("rejects with EACCES when the stored file is unreadable", async () => {
+    const { saveFile, streamStoredFile } = await importModule();
+    const name = await saveFile(Buffer.from("locked"), "photo.png");
+    await chmod(join(testDir, name), 0o000);
+    const err = (await streamStoredFile(name).then(
+      () => null,
+      (e: unknown) => e,
+    )) as NodeJS.ErrnoException | null;
+    expect(err).toBeInstanceOf(Error);
+    expect(err?.code).toBe("EACCES");
+  });
+});
+
 // Regression guard for the path-traversal report: stored names are generated
 // basenames, so any separator/parent-reference/absolute name must be rejected
 // before it is joined onto FILES_STORAGE_PATH. Without the guard a poisoned

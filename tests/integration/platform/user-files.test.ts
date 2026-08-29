@@ -5,8 +5,12 @@
  * bulk delete, save-result versioning, search, and pagination.
  */
 
+import { chmod, unlink } from "node:fs/promises";
+import { eq } from "drizzle-orm";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { db, schema } from "../../../apps/api/src/db/index.js";
+import { getStoredFilePath } from "../../../apps/api/src/lib/file-storage.js";
 import { fixtures, readFixture } from "../../fixtures/index.js";
 import {
   buildTestApp,
@@ -285,6 +289,78 @@ describe("File download", () => {
     });
 
     expect(res.statusCode).toBe(404);
+  });
+
+  // #899: a userFiles row whose backing blob vanished (volume reset, manual
+  // prune) must 404 like any other missing file, not 500. createReadStream
+  // used to defer the ENOENT past the route's try/catch.
+  it("returns 404 when the backing blob is missing from storage", async () => {
+    const { body: uploadBody, contentType: uploadCt } = createMultipartPayload([
+      { name: "file", filename: "gone-blob.png", contentType: "image/png", content: PNG },
+    ]);
+
+    const uploadRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/files/upload",
+      headers: { "content-type": uploadCt, authorization: `Bearer ${adminToken}` },
+      body: uploadBody,
+    });
+
+    const fileId = JSON.parse(uploadRes.body).files[0].id;
+
+    // Remove the blob out from under the row, like a pruned data volume would
+    const [row] = await db
+      .select({ storedName: schema.userFiles.storedName })
+      .from(schema.userFiles)
+      .where(eq(schema.userFiles.id, fileId));
+    await unlink(getStoredFilePath(row.storedName));
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/files/${fileId}/download`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body).error).toMatch(/not found in storage/i);
+  });
+
+  // An unreadable blob is a storage fault (volume UID drift, botched restore),
+  // not a deleted file. It must stay a 500 that reaches the error handler and
+  // Sentry, never fold into the missing-blob 404.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  it.skipIf(isRoot)("returns 500, not a silent 404, when the blob is unreadable", async () => {
+    const { body: uploadBody, contentType: uploadCt } = createMultipartPayload([
+      { name: "file", filename: "locked-blob.png", contentType: "image/png", content: PNG },
+    ]);
+
+    const uploadRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/files/upload",
+      headers: { "content-type": uploadCt, authorization: `Bearer ${adminToken}` },
+      body: uploadBody,
+    });
+
+    const fileId = JSON.parse(uploadRes.body).files[0].id;
+
+    const [row] = await db
+      .select({ storedName: schema.userFiles.storedName })
+      .from(schema.userFiles)
+      .where(eq(schema.userFiles.id, fileId));
+    const blobPath = getStoredFilePath(row.storedName);
+    await chmod(blobPath, 0o000);
+
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/v1/files/${fileId}/download`,
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+
+      expect(res.statusCode).toBe(500);
+    } finally {
+      await chmod(blobPath, 0o644);
+    }
   });
 });
 

@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdir, readFile, statfs, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, statfs, unlink, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { S3StorageModule } from "@snapotter/enterprise";
@@ -189,7 +188,13 @@ export async function streamStoredFile(storedName: string): Promise<Readable> {
     const s3 = await getS3();
     return s3.getObjectStream(storedName);
   }
-  return createReadStream(join(env.FILES_STORAGE_PATH, storedName));
+  const filePath = join(env.FILES_STORAGE_PATH, storedName);
+  // A path-based createReadStream defers the open, so any open-time failure
+  // (missing blob, EACCES) would only surface as an async "error" event after
+  // the caller's try/catch has exited. Open eagerly so those reject here,
+  // like the S3 branch does.
+  const handle = await open(filePath, "r");
+  return handle.createReadStream();
 }
 
 export async function deleteStoredFile(storedName: string): Promise<void> {
