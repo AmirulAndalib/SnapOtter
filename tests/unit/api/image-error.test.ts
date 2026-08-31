@@ -1,6 +1,18 @@
-import { isSafeMessageError, markToolInputError, SafeError } from "@snapotter/shared";
+import {
+  isSafeMessageError,
+  isToolInputError,
+  markToolInputError,
+  SafeError,
+} from "@snapotter/shared";
+import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { withImageEncodeContext } from "../../../apps/api/src/lib/image-error.js";
+import {
+  asInputErrorIfUndecodable,
+  PIXEL_LIMIT_IMAGE_MESSAGE,
+  UNDECODABLE_IMAGE_MESSAGE,
+  withImageEncodeContext,
+} from "../../../apps/api/src/lib/image-error.js";
+import { fixtures, readFixture } from "../../fixtures/index.js";
 
 interface Settings {
   format: string;
@@ -68,5 +80,49 @@ describe("withImageEncodeContext", () => {
       },
     );
     await expect(wrapped(input, settings, "in.png")).rejects.toBe(inputErr);
+  });
+});
+
+describe("asInputErrorIfUndecodable", () => {
+  // Passes metadata-only intake but fails any full pixel decode (#897).
+  const truncatedJpg = readFixture(fixtures.image.hostile.truncated);
+
+  it("classifies a Sharp failure on an undecodable input as ToolInputError", async () => {
+    const sharpErr = new Error(
+      "VipsJpeg: premature end of JPEG image\njpegload_buffer: load error",
+    );
+    const err = await asInputErrorIfUndecodable(truncatedJpg, sharpErr);
+    expect(isToolInputError(err)).toBe(true);
+    expect(err.message).toBe(UNDECODABLE_IMAGE_MESSAGE);
+  });
+
+  it("returns the original error when the input decodes fine (downstream bugs stay bugs)", async () => {
+    const decodable = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    })
+      .png()
+      .toBuffer();
+    const bug = new TypeError("Cannot read properties of undefined (reading 'mean')");
+    const err = await asInputErrorIfUndecodable(decodable, bug);
+    expect(err).toBe(bug);
+  });
+
+  it("names the pixel limit when an oversized (not corrupt) image trips it", async () => {
+    // Valid PNG headers declaring 50000x50000: passes metadata-only intake but
+    // exceeds libvips' default limitInputPixels, in both the pipeline and the
+    // probe. Calling that "corrupt" would mislead; the message must say "large".
+    const bombPng = readFixture(fixtures.image.hostile.bomb);
+    const sharpErr = new Error("Input image exceeds pixel limit");
+    const err = await asInputErrorIfUndecodable(bombPng, sharpErr);
+    expect(isToolInputError(err)).toBe(true);
+    expect(err.message).toBe(PIXEL_LIMIT_IMAGE_MESSAGE);
+  });
+
+  it("passes through already-classified errors without reclassifying", async () => {
+    const safe = new SafeError("Process killed (out of memory)", { kind: "operational" });
+    expect(await asInputErrorIfUndecodable(truncatedJpg, safe)).toBe(safe);
+
+    const inputErr = markToolInputError(new Error("Unsupported input"));
+    expect(await asInputErrorIfUndecodable(truncatedJpg, inputErr)).toBe(inputErr);
   });
 });
