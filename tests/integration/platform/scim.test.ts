@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { db, schema } from "../../../apps/api/src/db/index.js";
 import { hashPassword, verifyPassword } from "../../../apps/api/src/plugins/auth.js";
+import { raceInserts } from "../../helpers/pg-race.js";
 import { buildTestApp, type TestApp } from "../test-server.js";
 
 let testApp: TestApp;
@@ -971,6 +972,35 @@ describe("SCIM licensed Users and Groups CRUD", () => {
       });
     });
 
+    it("concurrent duplicate creates return one 201 and one SCIM 409, never 500", async () => {
+      // Issue #927: IdP provisioning retries can race. Requests that pass
+      // the duplicate pre-check before the winner's insert commits used to
+      // surface the 23505 unique violation as a 500. raceInserts holds both
+      // requests at the insert so each one passes the pre-check.
+      const userName = uniqueName("scim-create-race");
+      const create = () =>
+        crudApp.app.inject({
+          method: "POST",
+          url: "/api/v1/scim/v2/Users",
+          headers: authHeaders(),
+          payload: { userName },
+        });
+
+      const results = await raceInserts("users", 2, () => Promise.all([create(), create()]));
+      const statuses = results.map((r) => r.statusCode).sort();
+      expect(statuses).toEqual([201, 409]);
+
+      const conflict = results.find((r) => r.statusCode === 409);
+      expect(JSON.parse(conflict?.body ?? "{}")).toMatchObject({
+        schemas: [SCIM_ERROR_SCHEMA],
+        status: 409,
+        detail: "User already exists",
+      });
+
+      const rows = await db.select().from(schema.users).where(eq(schema.users.username, userName));
+      expect(rows).toHaveLength(1);
+    });
+
     it("rejects a duplicate userName with the SCIM 409 envelope", async () => {
       const { userName } = await createScimUser({ userName: uniqueName("scim-create-dup") });
       const res = await crudApp.app.inject({
@@ -1487,6 +1517,34 @@ describe("SCIM licensed Users and Groups CRUD", () => {
         status: 400,
         detail: "displayName is required",
       });
+    });
+
+    it("concurrent duplicate group creates return one 201 and one SCIM 409, never 500", async () => {
+      // Issue #927: same race as Users create, one insert lower. Groups
+      // are teams rows, so the loser used to hit the teams.name unique
+      // constraint and 500.
+      const displayName = uniqueName("scim-group-race");
+      const create = () =>
+        crudApp.app.inject({
+          method: "POST",
+          url: "/api/v1/scim/v2/Groups",
+          headers: authHeaders(),
+          payload: { displayName },
+        });
+
+      const results = await raceInserts("teams", 2, () => Promise.all([create(), create()]));
+      const statuses = results.map((r) => r.statusCode).sort();
+      expect(statuses).toEqual([201, 409]);
+
+      const conflict = results.find((r) => r.statusCode === 409);
+      expect(JSON.parse(conflict?.body ?? "{}")).toMatchObject({
+        schemas: [SCIM_ERROR_SCHEMA],
+        status: 409,
+        detail: "Group already exists",
+      });
+
+      const rows = await db.select().from(schema.teams).where(eq(schema.teams.name, displayName));
+      expect(rows).toHaveLength(1);
     });
 
     it("creates a group, assigns members, and reflects it on the user resource", async () => {

@@ -390,18 +390,28 @@ export async function registerScimRoutes(app: FastifyInstance): Promise<void> {
       const teamId = defaultTeam?.id ?? "default-team-00000000";
 
       const now = new Date();
-      await db.insert(schema.users).values({
-        id,
-        username: userName,
-        email,
-        externalId: externalId ?? null,
-        role: active ? "user" : "disabled",
-        team: teamId,
-        authProvider: "scim",
-        mustChangePassword: false,
-        createdAt: now,
-        updatedAt: now,
-      });
+      // The pre-check above can't close the race: IdP retries can send the
+      // same create twice, and both pass the SELECT before either insert
+      // commits (issue #927).
+      const inserted = await db
+        .insert(schema.users)
+        .values({
+          id,
+          username: userName,
+          email,
+          externalId: externalId ?? null,
+          role: active ? "user" : "disabled",
+          team: teamId,
+          authProvider: "scim",
+          mustChangePassword: false,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing({ target: schema.users.username });
+
+      if (!inserted.rowCount) {
+        return reply.status(409).send(scimError(409, "User already exists"));
+      }
 
       await auditLog(
         request.log,
@@ -810,11 +820,21 @@ export async function registerScimRoutes(app: FastifyInstance): Promise<void> {
       const id = randomUUID();
       const now = new Date();
 
-      await db.insert(schema.teams).values({
-        id,
-        name: displayName,
-        createdAt: now,
-      });
+      // The pre-check above can't close the race: IdP retries can send the
+      // same create twice, and both pass the SELECT before either insert
+      // commits (issue #927).
+      const inserted = await db
+        .insert(schema.teams)
+        .values({
+          id,
+          name: displayName,
+          createdAt: now,
+        })
+        .onConflictDoNothing({ target: schema.teams.name });
+
+      if (!inserted.rowCount) {
+        return reply.status(409).send(scimError(409, "Group already exists"));
+      }
 
       // Assign members to the team
       if (members && members.length > 0) {
