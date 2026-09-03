@@ -74,6 +74,22 @@ export async function checkConnection(): Promise<void> {
   await getClient().send(new HeadBucketCommand({ Bucket: cfg().bucket }));
 }
 
+/**
+ * True when a getObject/getObjectStream rejection is S3 reporting the object
+ * missing: NoSuchKey, or an unmodeled 404 from an S3-compatible store (the
+ * SDK stamps every dispatched error with $metadata). NoSuchBucket also
+ * arrives as HTTP 404 but means the whole bucket is gone, a storage outage
+ * rather than a missing file, so it stays a fault. Service faults
+ * (AccessDenied, credential rejection, 5xx) and errors that did not come
+ * from the SDK return false.
+ */
+export function isMissingObjectError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("$metadata" in error)) return false;
+  const e = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+  if (e.name === "NoSuchBucket") return false;
+  return e.name === "NoSuchKey" || e.$metadata?.httpStatusCode === 404;
+}
+
 export async function putObject(storedName: string, buffer: Buffer): Promise<void> {
   await getClient().send(
     new PutObjectCommand({

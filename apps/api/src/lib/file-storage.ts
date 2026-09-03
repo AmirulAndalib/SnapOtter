@@ -182,6 +182,21 @@ export async function readStoredFile(storedName: string): Promise<Buffer> {
   return readFile(join(env.FILES_STORAGE_PATH, storedName));
 }
 
+/**
+ * True when a readStoredFile/streamStoredFile rejection in S3 mode is a
+ * storage fault that must keep reaching the error handler (#937): anything
+ * except S3 reporting the object missing or this module's own SafeError
+ * validation (a poisoned stored_name keeps its long-standing 404 mapping).
+ * The inversion is deliberate: a fault mistaken for a missing blob presents
+ * an outage as mass deletion, so only proven-missing maps to 404. Local
+ * -backend rejections return false; their errno shape already routes them.
+ */
+export function isStorageServiceFault(error: unknown): boolean {
+  if (!isS3Enabled()) return false;
+  if (error instanceof SafeError) return false;
+  return !s3Mod || !s3Mod.isMissingObjectError(error);
+}
+
 export async function streamStoredFile(storedName: string): Promise<Readable> {
   assertSafeStoredName(storedName);
   if (isS3Enabled()) {
