@@ -8,7 +8,13 @@ import { validateImageBuffer } from "../lib/file-validation.js";
 import { sanitizeFilename } from "../lib/filename.js";
 import { decodeToSharpCompat, needsCliDecode } from "../lib/format-decoders.js";
 import { decodeHeic } from "../lib/heic-converter.js";
-import { getObjectSize, getObjectStream, putObject } from "../lib/object-storage.js";
+import {
+  getObjectSize,
+  getObjectStream,
+  isStorageServiceFault,
+  isValidObjectKey,
+  putObject,
+} from "../lib/object-storage.js";
 import { isSvgBuffer, sanitizeSvg } from "../lib/svg-sanitize.js";
 import { requireFileAccess, requirePermission } from "../permissions.js";
 
@@ -163,16 +169,41 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: "Invalid path" });
       }
 
+      // A key that cannot name a stored object (URL-decoded garbage that
+      // passes the traversal guard) keeps its long-standing 404 without
+      // touching storage; past this point a probe failure is meaningful.
+      if (!isValidObjectKey(`outputs/${jobId}/${filename}`)) {
+        return reply.status(404).send({ error: "File not found" });
+      }
+
+      // A size-probe rejection is only a miss when storage says the object
+      // is not there. A syscall fault other than ENOENT (EACCES, ENOTDIR)
+      // or an S3 service fault (AccessDenied, rotated credentials, S3 5xx)
+      // is a storage outage that must keep reaching the global handler and
+      // Sentry, not fold into "File not found" (#974, sibling of #937).
+      // ENAMETOOLONG counts as a miss: no object can exist at such a key,
+      // and this route takes unauthenticated client-supplied names (params
+      // up to maxParamLength: 500 exceed the 255-byte filename limit), so
+      // long garbage must stay 404 instead of paging Sentry.
+      const rethrowIfStorageFault = (e: unknown): void => {
+        const { code, syscall } = e as NodeJS.ErrnoException;
+        if (syscall && code !== "ENOENT" && code !== "ENAMETOOLONG") throw e;
+        if (isStorageServiceFault(e)) throw e;
+      };
+
       // Resolve from object storage: outputs/ first, then uploads/
       let key = `outputs/${jobId}/${filename}`;
       let size: number;
       try {
         size = await getObjectSize(key);
-      } catch {
+      } catch (outputsErr) {
+        rethrowIfStorageFault(outputsErr);
         key = `uploads/${jobId}/${filename}`;
         try {
           size = await getObjectSize(key);
-        } catch {
+        } catch (uploadsErr) {
+          rethrowIfStorageFault(uploadsErr);
+          request.log.warn({ jobId, filename }, "result download: object missing in storage");
           return reply.status(404).send({ error: "File not found" });
         }
       }
