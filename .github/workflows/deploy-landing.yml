@@ -73,3 +73,12 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Cloudflare can add scripts at the zone edge that never appear in the
+      # built output: its Web Analytics beacon rode every page this way (#793).
+      # Web Analytics is the one edge feature we keep, so it is allowlisted.
+      # Audit the page a visitor receives and fail the run if it loads anything
+      # else from an origin we did not choose. PostHog loads at runtime from
+      # inline script, so it never shows up as a tag here.
+      - name: Verify the live site loads nothing third-party
+        run: node scripts/check-live-egress.mjs https://snapotter.com/ --allow https://static.cloudflareinsights.com
