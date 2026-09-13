@@ -38,7 +38,7 @@ import { useMobile } from "@/hooks/use-mobile";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { usePipelineProcessor } from "@/hooks/use-pipeline-processor";
 import { formatHeaders, getFileDownloadUrl } from "@/lib/api";
-import { formatFileSize } from "@/lib/download";
+import { downloadBlob, formatFileSize, triggerDownload } from "@/lib/download";
 import { format, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useFileStore } from "@/stores/file-store";
@@ -181,6 +181,22 @@ export function AutomatePage() {
       }
     })();
   }, [location.state, location.pathname, navigate, resetFiles, setFiles]);
+
+  // Arrive with a clean file store, the way tool-page does on every tool change.
+  //
+  // A tool page can hand this one a run that is already over: use-tool-processor
+  // aborts and closes on unmount without clearing the store's processing flag,
+  // and nothing on this page owns that flag afterwards. The navigation guard
+  // counts /automate as owning the file store, so the leftovers would have it
+  // asking about finished work on every navigation away and every tab close,
+  // for as long as the tab stayed open (#1122).
+  //
+  // Not when the navigation carries a library import: those files are the point
+  // of the visit, and the effect above owns the store from there.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: arrival only; a later state change must not wipe the page
+  useEffect(() => {
+    if (!(location.state as { libraryFileIds?: string[] } | null)?.libraryFileIds) resetFiles();
+  }, []);
 
   const handleLibraryImport = useCallback(
     (imported: File[]) => {
@@ -390,20 +406,18 @@ export function AutomatePage() {
 
   const handleDownloadAll = useCallback(() => {
     if (!batchZipBlob) return;
-    const url = URL.createObjectURL(batchZipBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = batchZipFilename ?? "batch-pipeline.zip";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(batchZipBlob, batchZipFilename ?? "batch-pipeline.zip");
+    useFileStore.getState().markBatchClaimed();
   }, [batchZipBlob, batchZipFilename]);
 
+  // The store owns processedUrl (an API download URL here, a blob URL after a
+  // batch run) and revokes it in reset(). Hand the existing URL to
+  // triggerDownload; downloadBlob would mint and revoke a URL this page
+  // does not own.
   const handleDownloadSingle = useCallback(() => {
     if (!processedUrl) return;
-    const a = document.createElement("a");
-    a.href = processedUrl;
-    a.download = currentEntry?.processedFilename ?? "result";
-    a.click();
+    triggerDownload(processedUrl, currentEntry?.processedFilename ?? "result");
+    useFileStore.getState().claimSelected();
   }, [processedUrl, currentEntry]);
 
   const handleNavKeyDown = useCallback(
@@ -467,7 +481,10 @@ export function AutomatePage() {
           <Suspense
             fallback={<div className="text-sm text-muted-foreground">{t.common.loading}</div>}
           >
-            <WaveformPlayer src={processedUrl} />
+            <WaveformPlayer
+              src={processedUrl}
+              onDownload={() => useFileStore.getState().claimSelected()}
+            />
           </Suspense>
         );
       }

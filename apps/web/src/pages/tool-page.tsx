@@ -45,11 +45,11 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMobile } from "@/hooks/use-mobile";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { recordRecentTool } from "@/hooks/use-recent-tools";
-import { formatFileSize } from "@/lib/download";
+import { downloadBlob, formatFileSize } from "@/lib/download";
 import { classifyFeedbackError } from "@/lib/feedback";
 import { format } from "@/lib/format";
 import { ICON_MAP } from "@/lib/icon-map";
-import { shouldShowConversionCard } from "@/lib/result-display";
+import { playerDownloadClaim, shouldShowConversionCard } from "@/lib/result-display";
 import {
   LIVE_PREVIEW_INPUT_OVERLAY_TOOLS,
   MULTI_FILE_TOOLS,
@@ -559,12 +559,8 @@ export function ToolPage() {
 
   const handleDownloadAll = useCallback(() => {
     if (!batchZipBlob) return;
-    const url = URL.createObjectURL(batchZipBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = batchZipFilename ?? "processed-files.zip";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(batchZipBlob, batchZipFilename ?? "processed-files.zip");
+    useFileStore.getState().markBatchClaimed();
   }, [batchZipBlob, batchZipFilename]);
 
   if (tool && disabledTools.includes(tool.id)) {
@@ -637,6 +633,12 @@ export function ToolPage() {
   const displayMode = registryEntry.displayMode;
   const isNoDropzone = displayMode === "no-dropzone";
   const isLivePreview = registryEntry.livePreview ?? false;
+  // A landed result normally swaps the image area for a view of it. interactive-sign
+  // is the exception: renderImageArea keeps the sign canvas either way, and the
+  // result is a download its own settings panel offers. Remounting on a new key
+  // would throw away the signatures the user just placed, and fading the area
+  // back in would flash the page for a view that did not change.
+  const resultOwnsImageArea = hasProcessed && displayMode !== "interactive-sign";
 
   // Derive processed file info: use stored filename for batch results (blob URLs),
   // fall back to parsing the download URL for single-file results
@@ -726,7 +728,13 @@ export function ToolPage() {
             <Suspense
               fallback={<div className="text-sm text-muted-foreground">{t.common.loading}</div>}
             >
-              <WaveformPlayer src={audioSrc} />
+              <WaveformPlayer
+                src={audioSrc}
+                // audioSrc falls back to the original, and only a result claims.
+                onDownload={playerDownloadClaim(processedUrl, () =>
+                  useFileStore.getState().claimSelected(),
+                )}
+              />
             </Suspense>
           );
         }
@@ -1459,13 +1467,13 @@ export function ToolPage() {
           </div>
           <div
             key={
-              hasProcessed
+              resultOwnsImageArea
                 ? `processed-${selectedIndex}`
                 : displayMode === "interactive-eraser"
                   ? "pending-eraser"
                   : `pending-${selectedIndex}`
             }
-            className={`flex-1 relative flex items-center justify-center p-6 min-h-0 min-w-0 ${hasProcessed ? "animate-fade-in" : ""}${isProcessing ? " animate-pulse" : ""}`}
+            className={`flex-1 relative flex items-center justify-center p-6 min-h-0 min-w-0 ${resultOwnsImageArea ? "animate-fade-in" : ""}${isProcessing ? " animate-pulse" : ""}`}
           >
             {renderNavArrows()}
             {renderImageArea()}
