@@ -6,6 +6,7 @@ import { copyToClipboard } from "@/lib/utils";
 import type { Base64Result } from "@/stores/base64-store";
 import { useBase64Store } from "@/stores/base64-store";
 import { useFileStore } from "@/stores/file-store";
+import { base64ResultKey, claimToolResult } from "@/stores/tool-result-claims";
 
 // -- Snippet generators -----------------------------------------------------
 
@@ -63,7 +64,16 @@ function downloadFile(content: string, filename: string, type: string) {
 
 // -- CopyButton -------------------------------------------------------------
 
-function CopyButton({ text, label }: { text: string; label?: string }) {
+function CopyButton({
+  text,
+  label,
+  onCopied,
+}: {
+  text: string;
+  label?: string;
+  /** Called once the text really reached the clipboard, never on a failure. */
+  onCopied?: () => void;
+}) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
 
@@ -72,8 +82,9 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     // navigator.clipboard does not exist (Sentry WEB-G).
     const ok = await copyToClipboard(text);
     setStatus(ok ? "copied" : "failed");
+    if (ok) onCopied?.();
     setTimeout(() => setStatus("idle"), 2000);
-  }, [text]);
+  }, [text, onCopied]);
 
   return (
     <button
@@ -97,7 +108,16 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
 
 // -- Single file result view ------------------------------------------------
 
-function FileResult({ result }: { result: Base64Result }) {
+/**
+ * One file's encoded text.
+ *
+ * These controls claim only when this file is the whole set, which the panel
+ * decides and passes down as onTaken. With several files encoded, taking this
+ * one leaves the rest untaken and the claim is per tool, so claiming here would
+ * answer for text the user never saw. Per-file granularity is the right answer
+ * for that case; until then this over-warns rather than going quiet.
+ */
+function FileResult({ result, onTaken }: { result: Base64Result; onTaken?: () => void }) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabId>("datauri");
   const tab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
@@ -120,7 +140,8 @@ function FileResult({ result }: { result: Base64Result }) {
     a.download = `${result.filename}.base64.txt`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [output, result.filename]);
+    onTaken?.();
+  }, [output, result.filename, onTaken]);
 
   return (
     <div className="flex flex-col h-full">
@@ -175,6 +196,7 @@ function FileResult({ result }: { result: Base64Result }) {
         <CopyButton
           text={output}
           label={t.toolSettings["image-to-base64-results"].copyToClipboard}
+          onCopied={onTaken}
         />
         <button
           type="button"
@@ -196,6 +218,21 @@ export function ImageToBase64Results() {
   const ts = t.toolSettings["image-to-base64-results"];
   const { results, errors, processing, progress } = useBase64Store();
   const { entries, selectedIndex, originalBlobUrl, selectedFileName } = useFileStore();
+
+  // Taking the whole set counts as taking this run: the navigation guard stops
+  // warning about it, and starts again the moment another run replaces these
+  // results.
+  const claimResults = useCallback(() => {
+    claimToolResult("image-to-base64", base64ResultKey(results));
+  }, [results]);
+
+  // The same set rule where the set has one member. One encoded file is the
+  // whole set, so taking it takes everything the guard is warning about, and
+  // the copy-all bar is not even rendered in that state: without this the tool
+  // would nag on its most common path. Gated on the results the guard keys on
+  // rather than on the file count, so the two cannot disagree. Not the start of
+  // per-file tracking: with two results, taking one still leaves the other.
+  const singleResultClaim = results.length === 1 ? claimResults : undefined;
 
   // -- Processing state: progress bar --
   if (processing) {
@@ -294,6 +331,7 @@ export function ImageToBase64Results() {
                 2,
               )}
               label={ts.copyAllAsJson}
+              onCopied={claimResults}
             />
             <button
               type="button"
@@ -310,6 +348,7 @@ export function ImageToBase64Results() {
                   2,
                 );
                 downloadFile(json, "base64-all.json", "application/json");
+                claimResults();
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
             >
@@ -323,6 +362,7 @@ export function ImageToBase64Results() {
                   .map((r) => `--- ${r.filename} ---\n${r.dataUri}\n`)
                   .join("\n");
                 downloadFile(lines, "base64-all.txt", "text/plain");
+                claimResults();
               }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
             >
@@ -336,7 +376,7 @@ export function ImageToBase64Results() {
       {/* Current file result */}
       <div className="flex-1 min-h-0">
         {currentResult ? (
-          <FileResult result={currentResult} />
+          <FileResult result={currentResult} onTaken={singleResultClaim} />
         ) : currentError ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">

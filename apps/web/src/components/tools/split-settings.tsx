@@ -7,6 +7,7 @@ import { format } from "@/lib/format";
 import { useFileStore } from "@/stores/file-store";
 import type { SplitMode } from "@/stores/split-store";
 import { useSplitStore } from "@/stores/split-store";
+import { claimToolResult, splitResultKey } from "@/stores/tool-result-claims";
 
 const MODES: Array<{ id: SplitMode; label: string }> = [
   { id: "grid", label: "Grid" },
@@ -202,7 +203,8 @@ export function SplitSettings() {
       files.length > 1 ? "split-batch" : (files[0]?.name?.replace(/\.[^.]+$/, "") ?? "split");
     a.download = `${baseName}-${grid.columns}x${grid.rows}.zip`;
     a.click();
-  }, [zipBlobUrl, files, grid]);
+    claimToolResult("split", splitResultKey(tiles, zipBlobUrl));
+  }, [zipBlobUrl, tiles, files, grid]);
 
   const handleDownloadTile = useCallback(
     (index: number) => {
@@ -217,6 +219,12 @@ export function SplitSettings() {
       a.download = `${baseName}_r${tile.row}_c${tile.col}.${ext}`;
       a.click();
       setTimeout(() => setDownloadingIndex(null), 500);
+      // Deliberately claims nothing. One tile is not the set, and the claim is
+      // per tool, so claiming here would drop the warning for the tiles the
+      // user never took. Tracking which tiles have been taken is the right
+      // answer; warning about a tile already downloaded is the safe
+      // approximation until then, because silence is the costlier way to be
+      // wrong.
     },
     [tiles, files, outputFormat],
   );

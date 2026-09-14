@@ -159,7 +159,12 @@ export function PdfToImagePreview() {
                   </div>
                 )}
 
-                {/* Download overlay */}
+                {/* Download overlay. Claims nothing: one page out of forty is
+                    not the set, and the claim is per tool, so claiming here
+                    would drop the warning for the thirty-nine pages the user
+                    never took. Per-page granularity is the right answer; until
+                    then the zip button claims and this does not, so someone who
+                    saves every page one at a time still gets asked. */}
                 <a
                   href={result.downloadUrl}
                   download={`page-${result.page}.${store.format}`}
