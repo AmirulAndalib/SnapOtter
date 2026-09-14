@@ -1765,6 +1765,44 @@ describe("SCIM licensed Users and Groups CRUD", () => {
       });
     });
 
+    it("trims the SCIM group displayName so a whitespace twin is a duplicate, not a new team (#988)", async () => {
+      // The teams API trims names at the Zod boundary; SCIM must too, or an IdP
+      // sending "Engineering " creates a second team the rest of the API cannot
+      // tell from "Engineering". lower(name) does not catch it either, since
+      // lower("foo ") != lower("foo").
+      const base = uniqueName("scim-grp-ws");
+      await createScimGroup({ displayName: base });
+
+      const res = await crudApp.app.inject({
+        method: "POST",
+        url: "/api/v1/scim/v2/Groups",
+        headers: authHeaders(),
+        payload: { displayName: `  ${base}  ` },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body)).toMatchObject({
+        schemas: [SCIM_ERROR_SCHEMA],
+        status: 409,
+        detail: "Group already exists",
+      });
+    });
+
+    it("rejects a PATCH that renames a group to only whitespace instead of silently skipping (#988)", async () => {
+      // A silent no-op would leave the IdP believing the rename applied while
+      // the team kept its old name.
+      const group = await createScimGroup({ displayName: uniqueName("scim-grp-patch") });
+
+      const res = await crudApp.app.inject({
+        method: "PATCH",
+        url: `/api/v1/scim/v2/Groups/${group.id}`,
+        headers: authHeaders(),
+        payload: { Operations: [{ op: "replace", path: "displayName", value: "   " }] },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+
     it("creates a group, assigns members, and reflects it on the user resource", async () => {
       const memberA = await createScimUser({ userName: uniqueName("scim-grp-m1") });
       const memberB = await createScimUser({ userName: uniqueName("scim-grp-m2") });
@@ -2118,7 +2156,7 @@ describe("SCIM licensed Users and Groups CRUD", () => {
       expect(JSON.parse(noMatch.body).members).toHaveLength(1);
     });
 
-    it("PATCH replaces displayName and skips empty replacement names", async () => {
+    it("PATCH replaces displayName and rejects an empty replacement name", async () => {
       const group = await createScimGroup({ displayName: uniqueName("scim-group-rename") });
       const renamed = uniqueName("scim-group-renamed");
 
@@ -2137,8 +2175,9 @@ describe("SCIM licensed Users and Groups CRUD", () => {
         headers: authHeaders(),
         payload: { Operations: [{ op: "replace", path: "displayName", value: "" }] },
       });
-      expect(emptyRename.statusCode).toBe(200);
-      expect(JSON.parse(emptyRename.body).displayName).toBe(renamed);
+      // #988 flipped this from a silent skip: a 200 carrying the old name told
+      // the IdP the rename had applied. The name is still left alone.
+      expect(emptyRename.statusCode).toBe(400);
       const [teamRowDb] = await db.select().from(schema.teams).where(eq(schema.teams.id, group.id));
       expect(teamRowDb?.name).toBe(renamed);
     });
