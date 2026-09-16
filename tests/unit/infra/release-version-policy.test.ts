@@ -11,6 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  COMPOSE_LINK_VERSION,
+  updateReleaseReferences,
+} from "../../../scripts/sync-published-docs-version.mjs";
 
 const root = process.cwd();
 const rootPackage = JSON.parse(readFileSync(path.resolve(root, "package.json"), "utf8"));
@@ -30,6 +34,17 @@ function workspaceManifests(): string[] {
       .map((name) => path.join(group, name, "package.json"))
       .filter((manifest) => existsSync(path.resolve(root, manifest))),
   );
+}
+
+function releasePages(): string[] {
+  const pages = ["apps/docs/guide/getting-started.md", "apps/docs/guide/security.md"];
+  for (const locale of readdirSync(path.resolve(root, "apps/docs"))) {
+    for (const page of ["getting-started.md", "security.md"]) {
+      const candidate = path.join("apps/docs", locale, "guide", page);
+      if (existsSync(path.resolve(root, candidate))) pages.push(candidate);
+    }
+  }
+  return pages;
 }
 
 describe("release version domains", () => {
@@ -76,22 +91,17 @@ describe("release version domains", () => {
     const syncScript = readFileSync(path.resolve(root, "scripts/sync-version.sh"), "utf8");
     expect(syncScript).toContain('node "$ROOT/scripts/sync-published-docs-version.mjs" "$VERSION"');
 
-    const releasePages = ["apps/docs/guide/getting-started.md", "apps/docs/guide/security.md"];
-    for (const locale of readdirSync(path.resolve(root, "apps/docs"))) {
-      for (const page of ["getting-started.md", "security.md"]) {
-        const candidate = path.join("apps/docs", locale, "guide", page);
-        if (existsSync(path.resolve(root, candidate))) releasePages.push(candidate);
-      }
-    }
-    for (const page of releasePages) {
+    for (const page of releasePages()) {
       const source = readFileSync(path.resolve(root, page), "utf8");
       const versions = [
-        ...source.matchAll(/SnapOtter\/(?:blob\/)?v([^/]+)\/docker\/docker-compose\.yml/g),
-        ...source.matchAll(
-          /snapotter-v([0-9][0-9A-Za-z.+-]*?)-(?:release-subjects|image-linux-amd64-sbom)/g,
-        ),
-        ...source.matchAll(/snapotter\/snapotter:([0-9][0-9A-Za-z.+-]*)/g),
-      ].map((match) => match[1]);
+        ...(source.match(COMPOSE_LINK_VERSION) ?? []),
+        ...[
+          ...source.matchAll(
+            /snapotter-v([0-9][0-9A-Za-z.+-]*?)-(?:release-subjects|image-linux-amd64-sbom)/g,
+          ),
+          ...source.matchAll(/snapotter\/snapotter:([0-9][0-9A-Za-z.+-]*)/g),
+        ].map((match) => match[1]),
+      ];
       expect(versions.length, `${page} must contain release-coupled examples`).toBeGreaterThan(0);
       expect(new Set(versions), `${page} has a stale release example`).toEqual(
         new Set([rootPackage.version]),
@@ -99,22 +109,43 @@ describe("release version domains", () => {
     }
   });
 
+  it("keeps every Compose link in the release pages in a shape the release sync rewrites", () => {
+    // A link the release sync cannot rewrite (blob/main in #1035) pairs the pulled
+    // latest image with settings the published release cannot honor.
+    for (const page of releasePages()) {
+      const source = readFileSync(path.resolve(root, page), "utf8");
+      const links = [
+        ...source.matchAll(/snapotter-hq\/snapotter\/[^\s)]*docker-compose[^\s)]*/gi),
+      ].map((match) => match[0]);
+      for (const link of links) {
+        expect(
+          updateReleaseReferences(link, "9.9.9"),
+          `${page}: the release sync would leave ${link} stale; link the file at blob/v<version>`,
+        ).toContain("9.9.9");
+      }
+    }
+  });
+
   it("rewrites every published release-reference shape for the next version", () => {
     const fixtureRoot = mkdtempSync(path.join(tmpdir(), "snapotter-docs-version-"));
-    const guide = path.join(fixtureRoot, "apps/docs/guide");
-    mkdirSync(guide, { recursive: true });
+    const pages = ["guide/getting-started.md", "guide/security.md", "de/guide/security.md"].map(
+      (page) => path.join(fixtureRoot, "apps/docs", page),
+    );
     const fixture = [
       "https://raw.githubusercontent.com/snapotter-hq/SnapOtter/v1.9.0/docker/docker-compose.yml",
       "https://github.com/snapotter-hq/SnapOtter/blob/v1.9.0/docker/docker-compose.yml",
+      "https://github.com/snapotter-hq/SnapOtter/blob/v1.9.0/docker/docker-compose-gpu.yml",
       "snapotter-v1.9.0-release-subjects.json",
       "snapotter-v1.9.0-image-linux-amd64-sbom.cdx.json",
       "snapotter-v1.9.0-image-linux-amd64-sbom.spdx.json",
       "snapotter/snapotter:1.9.0",
     ].join("\n");
     try {
-      writeFileSync(path.join(guide, "getting-started.md"), fixture);
-      writeFileSync(path.join(guide, "security.md"), fixture);
-      execFileSync(
+      for (const page of pages) {
+        mkdirSync(path.dirname(page), { recursive: true });
+        writeFileSync(page, fixture);
+      }
+      const stdout = execFileSync(
         process.execPath,
         [
           path.resolve(root, "scripts/sync-published-docs-version.mjs"),
@@ -124,10 +155,11 @@ describe("release version domains", () => {
         ],
         { encoding: "utf8" },
       );
-      for (const page of ["getting-started.md", "security.md"]) {
-        const source = readFileSync(path.join(guide, page), "utf8");
+      expect(stdout).toContain("Updated 3 published documentation version file(s)");
+      for (const page of pages) {
+        const source = readFileSync(page, "utf8");
         expect(source).not.toContain("1.9.0");
-        expect(source.match(/3\.0\.0-rc\.1/g)).toHaveLength(6);
+        expect(source.match(/3\.0\.0-rc\.1/g)).toHaveLength(7);
       }
     } finally {
       rmSync(fixtureRoot, { force: true, recursive: true });
