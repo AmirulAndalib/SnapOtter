@@ -4150,6 +4150,7 @@ export const ru: TranslationKeys = {
         freehandShort: "Свободное",
         polygonalLasso: "Прямолинейное лассо",
         polygonalShort: "Прямолин.",
+        polygonalHint: "Enter, двойной клик или первая точка замыкает.",
         toleranceLabel: "Допуск:",
       },
       text: {
