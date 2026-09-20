@@ -143,6 +143,132 @@ export function convertRow(table: string, row: SqliteRow): SqliteRow {
   return out;
 }
 
+/** A 1.x user that arrives without the external identity its source row carried. */
+export interface DetachedIdentity {
+  id: string;
+  username: string;
+  authProvider: string;
+  externalId: string;
+  /** The imported row that kept the identity, or null when an existing account holds it. */
+  keptBy: { id: string; username: string } | null;
+}
+
+/**
+ * Key for the `users_auth_provider_external_id_unique` partial index, or null
+ * for a row that index ignores. Length-prefixed so no provider/external-id pair
+ * can spell another one.
+ */
+export function identityKey(row: SqliteRow): string | null {
+  const external = row.external_id;
+  if (external === null || external === undefined) return null;
+  // A source predating the auth_provider column leaves it absent, and the target
+  // column defaults to 'local', so key the row the way Postgres will store it.
+  // Keying it as "" instead would miss a collision the INSERT then hits.
+  const provider = row.auth_provider == null ? "local" : String(row.auth_provider);
+  return `${provider.length}:${provider}:${String(external)}`;
+}
+
+/**
+ * Migration 0008's rule (`apps/api/drizzle/0008_users_identity_unique.sql`):
+ * oldest created_at first, ties broken on the smallest id. 1.x stores epoch
+ * seconds and the #969 race fires well inside one second, so ties are the
+ * normal case here rather than the exotic one.
+ */
+function oldestFirst(a: SqliteRow, b: SqliteRow): number {
+  const at = a.created_at instanceof Date ? a.created_at.getTime() : 0;
+  const bt = b.created_at instanceof Date ? b.created_at.getTime() : 0;
+  if (at !== bt) return at - bt;
+  const ai = String(a.id);
+  const bi = String(b.id);
+  return ai < bi ? -1 : ai > bi ? 1 : 0;
+}
+
+/**
+ * Settle twin external identities across `rows` before they are inserted.
+ *
+ * 1.x carried the same auto-create race migration 0008 cleans up (issue #969),
+ * so a source database can hold two users rows for one (auth_provider,
+ * external_id). runMigrations() has already built the partial unique index by
+ * the time the copy runs, so without this the second INSERT raises 23505 and
+ * the whole import rolls back (issue #1005).
+ *
+ * Inside the source the keep-rule is 0008's: the oldest row keeps the identity
+ * and the rest get external_id = NULL, so an imported install lands in the same
+ * shape an upgraded one does. Against `taken`, the identities already in the
+ * target (only non-empty under --force), the row that is already here keeps the
+ * identity whatever its age: an import adds rows, it never unlinks an account
+ * someone signs into today.
+ *
+ * Clears external_id on the losing rows in place and returns them in source
+ * order, for the caller to report.
+ */
+export function detachTwinIdentities(
+  rows: SqliteRow[],
+  taken: ReadonlySet<string>,
+): DetachedIdentity[] {
+  const groups = new Map<string, SqliteRow[]>();
+  for (const row of rows) {
+    const key = identityKey(row);
+    if (key === null) continue;
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+
+  // Maps each losing row to the imported row that kept the identity, or to null
+  // when the target already holds it and no imported row wins.
+  const losers = new Map<SqliteRow, SqliteRow | null>();
+  for (const [key, group] of groups) {
+    group.sort(oldestFirst);
+    const targetHolds = taken.has(key);
+    for (const row of group.slice(targetHolds ? 0 : 1)) {
+      losers.set(row, targetHolds ? null : group[0]);
+    }
+  }
+
+  const detached: DetachedIdentity[] = [];
+  for (const row of rows) {
+    if (!losers.has(row)) continue;
+    const keeper = losers.get(row) ?? null;
+    detached.push({
+      id: String(row.id),
+      username: String(row.username),
+      authProvider: row.auth_provider == null ? "local" : String(row.auth_provider),
+      externalId: String(row.external_id),
+      keptBy: keeper ? { id: String(keeper.id), username: String(keeper.username) } : null,
+    });
+    row.external_id = null;
+  }
+  return detached;
+}
+
+/**
+ * One operator-facing line per detached row. It has to name the row that kept
+ * the identity, because unpicking this afterwards means hand-written SQL against
+ * external_id: there is no UI for it.
+ */
+export function detachedIdentityWarning(d: DetachedIdentity): string {
+  const who = `user "${d.username}" (id ${d.id})`;
+  const identity = `${d.authProvider} identity "${d.externalId}"`;
+  if (d.keptBy) {
+    return `1.x import: ${who} shares the ${identity} with user "${d.keptBy.username}" (id ${d.keptBy.id}), which keeps the link. Both rows were imported; only the older one signs in through that identity.`;
+  }
+  return `1.x import: ${who} was imported without its ${identity}, which an account already in this database holds. The imported row keeps its files and its provider, but no longer answers to that identity.`;
+}
+
+/** External identities the target already answers for. Empty on a fresh import. */
+async function heldIdentities(tx: { execute: typeof db.execute }): Promise<Set<string>> {
+  const res = await tx.execute(
+    sql`SELECT auth_provider, external_id FROM users WHERE external_id IS NOT NULL`,
+  );
+  const held = new Set<string>();
+  for (const row of res.rows) {
+    const key = identityKey(row as SqliteRow);
+    if (key !== null) held.add(key);
+  }
+  return held;
+}
+
 /** Live target columns for a public table (drizzle transaction handle). */
 async function targetColumns(
   tx: { execute: typeof db.execute },
@@ -166,6 +292,7 @@ export async function migrateFromSqlite(
 
   const sqlite = new Database(sqlitePath, { readonly: true, fileMustExist: true });
   const result: MigrationResult = { tables: {} };
+  const detached: DetachedIdentity[] = [];
   try {
     await db.transaction(async (tx) => {
       // Serialize concurrent replicas: only one import proceeds; losers re-check below.
@@ -173,7 +300,7 @@ export async function migrateFromSqlite(
       const existing = await tx.execute(sql`SELECT count(*)::int AS n FROM users`);
       if ((existing.rows[0].n as number) > 0 && !opts.force) {
         throw new TargetNonEmptyError(
-          "Target Postgres database is non-empty; refusing to migrate. Re-run with --force to attempt inserting 1.x rows into the existing database. This will FAIL and roll back if any primary key or unique value (username, team name, role name) collides with existing data.",
+          "Target Postgres database is non-empty; refusing to migrate. Re-run with --force to attempt inserting 1.x rows into the existing database. This will FAIL and roll back if any primary key or unique value (username, team name, role name) collides with existing data. The one exception is the (auth_provider, external_id) identity index: a 1.x user whose external identity already belongs to an account here is imported without that link instead of colliding.",
         );
       }
 
@@ -191,8 +318,19 @@ export async function migrateFromSqlite(
         }
 
         const target = await targetColumns(tx, table);
-        for (const row of rows) {
-          const converted = convertRow(table, row);
+        // users converts up front so twin external identities can be settled
+        // across the whole table before any INSERT: the partial unique index is
+        // already built and one 23505 aborts the transaction (issue #1005).
+        // Every other table stays row-at-a-time, so a large jobs table is never
+        // held twice over.
+        let convertedUsers: SqliteRow[] | null = null;
+        if (table === "users") {
+          convertedUsers = rows.map((row) => convertRow(table, row));
+          detached.push(...detachTwinIdentities(convertedUsers, await heldIdentities(tx)));
+        }
+
+        for (let i = 0; i < rows.length; i++) {
+          const converted = convertedUsers ? convertedUsers[i] : convertRow(table, rows[i]);
           // Self-adjusting: insert only columns that exist in the live target, so a
           // column 1.x has but 2.x dropped (analytics_*) is skipped generically.
           const cols = Object.keys(converted).filter((c) => target.has(c));
@@ -225,6 +363,9 @@ export async function migrateFromSqlite(
   } finally {
     sqlite.close();
   }
+  // Reported only once the transaction committed: a rolled-back import detached
+  // nothing, and saying otherwise sends the operator looking for ghosts.
+  for (const d of detached) console.warn(detachedIdentityWarning(d));
   return result;
 }
 // The CLI (including --dry-run) lives in sqlite-import.ts, the orchestrator that
