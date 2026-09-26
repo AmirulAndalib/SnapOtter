@@ -18,6 +18,7 @@ import { decodeToSharpCompat, needsCliDecode } from "../../lib/format-decoders.j
 import { decodeHeic } from "../../lib/heic-converter.js";
 import { getObjectBuffer, putObject } from "../../lib/object-storage.js";
 import { receiveUpload } from "../../lib/upload-stream.js";
+import { windowMax } from "../../lib/window-max.js";
 import { getAuthUser } from "../../plugins/auth.js";
 import { buildAsyncAcceptedPayload } from "../async-response.js";
 import { registerToolProcessFn } from "../tool-factory.js";
@@ -31,6 +32,16 @@ const settingsSchema = z.object({
   outputFormat: z.enum(["png", "webp"]).optional().default("png"),
   removeWatermark: z.boolean().optional().default(false),
 });
+
+// Alpha under this counts as background when deciding whether a pixel sits
+// next to it, so a faint noise floor left in the matte doesn't hide the
+// background from the fringe test.
+const BACKGROUND_ALPHA = 8;
+
+// Under a quarter opacity a uniform band could as easily be a halo as smoke,
+// and the matte comes back upscaled from at most 2048px, so halos wider than
+// the blur's reach are common. Pixels this faint keep the old absolute rule.
+const FAINT_ALPHA = 64;
 
 /**
  * Sharp-based defringe post-processing.
@@ -46,8 +57,10 @@ async function applyDefringe(buffer: Buffer, intensity: number): Promise<Buffer>
   const pixelCount = info.width * info.height;
 
   const alpha = Buffer.alloc(pixelCount);
+  const background = new Uint8Array(pixelCount);
   for (let i = 0; i < pixelCount; i++) {
     alpha[i] = data[i * 4 + 3];
+    background[i] = alpha[i] < BACKGROUND_ALPHA ? 1 : 0;
   }
 
   const blurRadius = Math.max(0.3, Math.round(intensity / 20));
@@ -67,10 +80,32 @@ async function applyDefringe(buffer: Buffer, intensity: number): Promise<Buffer>
     );
   }
 
+  // A faint pixel is fringe when its blurred alpha is under the threshold, as
+  // before. Any other pixel is fringe only at the subject's boundary with the
+  // background, where its neighbourhood is thin compared with the subject
+  // around it (#1178). That boundary test has two conditions, both judged
+  // over the pixels the blur read:
+  //  - background must be in reach, so an opaque region meeting a soft one
+  //    (skin under a sheer sleeve, a head under hair) is never cut apart;
+  //  - the threshold is a fraction of the most opaque alpha in reach, not of
+  //    255, so a uniform soft region (glass, smoke) blurs to its own alpha
+  //    and keeps its interior, trimmed at the edge like an opaque one.
+  // Where the blur saw a fully opaque pixel and background this is the old
+  // absolute rule, and it never clears a pixel the old rule kept.
+  // libvips cuts sharp's Gaussian where it drops under minAmplitude 0.2, so
+  // each blurred value comes from exactly this many pixels either side (none
+  // at sigma 0.3, where the blur changes nothing and only faint pixels go).
+  const blurFootprint = Math.floor(blurRadius * Math.sqrt(2 * Math.log(5)));
+  const peakAlpha = windowMax(alpha, info.width, info.height, blurFootprint);
+  const backgroundInReach = windowMax(background, info.width, info.height, blurFootprint);
   const threshold = Math.round(128 + (intensity / 100) * 80);
   const result = Buffer.from(data);
   for (let i = 0; i < pixelCount; i++) {
-    if (alpha[i] > 0 && blurredAlphaRaw[i] < threshold) {
+    const fringe =
+      alpha[i] < FAINT_ALPHA
+        ? blurredAlphaRaw[i] < threshold
+        : backgroundInReach[i] === 1 && blurredAlphaRaw[i] * 255 < threshold * peakAlpha[i];
+    if (alpha[i] > 0 && fringe) {
       result[i * 4] = 0;
       result[i * 4 + 1] = 0;
       result[i * 4 + 2] = 0;
