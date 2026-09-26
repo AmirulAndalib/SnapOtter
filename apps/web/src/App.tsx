@@ -5,12 +5,14 @@ import {
   createBrowserRouter,
   Navigate,
   Outlet,
+  useHref,
   useLocation,
 } from "react-router";
 // The /dom build injects ReactDOM.flushSync; the bare one leaves it undefined
 // and degrades view transitions and flushSync navigations to a console warning.
 import { RouterProvider } from "react-router/dom";
 import { Toaster, toast } from "sonner";
+import { appUrl, BASE_PATH } from "@/lib/app-url";
 import { ConnectionMonitor } from "./components/common/connection-monitor";
 import { KeyboardShortcutProvider } from "./components/common/keyboard-shortcut-provider";
 import { MigrationBanner } from "./components/common/migration-banner";
@@ -97,7 +99,7 @@ class ErrorBoundary extends Component<
               type="button"
               onClick={() => {
                 this.setState({ hasError: false, error: null });
-                window.location.href = "/";
+                window.location.href = appUrl("/");
               }}
               className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium"
             >
@@ -166,6 +168,10 @@ function PageLoader() {
  * because useBlocker (the navigation guard) requires a data router.
  */
 function RootLayout() {
+  // <base href> makes a bare "#main-content" resolve to the app root, which
+  // would load the home page. Point at the current page and move focus in place.
+  const { pathname, search } = useLocation();
+  const skipHref = `${useHref({ pathname, search })}#main-content`;
   // A data router wraps the root match in its own error boundary, so without
   // this the "Unexpected Application Error!" screen would replace our fallback
   // and componentDidCatch would never run (no crash event, no Sentry report).
@@ -174,7 +180,11 @@ function RootLayout() {
     <ErrorBoundary>
       <nav aria-label={en.a11y.skipToContent}>
         <a
-          href="#main-content"
+          href={skipHref}
+          onClick={(event) => {
+            event.preventDefault();
+            document.getElementById("main-content")?.focus();
+          }}
           className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:start-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-primary focus:text-primary-foreground focus:rounded-lg focus:text-sm focus:font-medium focus:shadow-lg"
         >
           {en.a11y.skipToContent}
@@ -204,28 +214,31 @@ function RootLayout() {
 const reportRouterError: ClientOnErrorFunction = (error, { errorInfo }) =>
   reportRenderError(error, errorInfo);
 
-const router = createBrowserRouter([
-  {
-    element: <RootLayout />,
-    children: [
-      { path: "/login", element: <LoginPage /> },
-      { path: "/change-password", element: <ChangePasswordPage /> },
-      { path: "/automate", element: <AutomatePage /> },
-      { path: "/files", element: <FilesPage /> },
-      { path: "/privacy", element: <PrivacyPolicyPage /> },
-      { path: "/editor", element: <EditorPage /> },
-      // Legacy 1.x color tools were consolidated into adjust-colors;
-      // redirect old bookmarks to the section route.
-      { path: "/brightness-contrast", element: <Navigate to="/image/adjust-colors" replace /> },
-      { path: "/saturation", element: <Navigate to="/image/adjust-colors" replace /> },
-      { path: "/color-channels", element: <Navigate to="/image/adjust-colors" replace /> },
-      { path: "/color-effects", element: <Navigate to="/image/adjust-colors" replace /> },
-      { path: "/:section/:toolId", element: <ToolPage /> },
-      { path: "/", element: <HomePage /> },
-      { path: "*", element: <NotFoundPage /> },
-    ],
-  },
-]);
+const router = createBrowserRouter(
+  [
+    {
+      element: <RootLayout />,
+      children: [
+        { path: "/login", element: <LoginPage /> },
+        { path: "/change-password", element: <ChangePasswordPage /> },
+        { path: "/automate", element: <AutomatePage /> },
+        { path: "/files", element: <FilesPage /> },
+        { path: "/privacy", element: <PrivacyPolicyPage /> },
+        { path: "/editor", element: <EditorPage /> },
+        // Legacy 1.x color tools were consolidated into adjust-colors;
+        // redirect old bookmarks to the section route.
+        { path: "/brightness-contrast", element: <Navigate to="/image/adjust-colors" replace /> },
+        { path: "/saturation", element: <Navigate to="/image/adjust-colors" replace /> },
+        { path: "/color-channels", element: <Navigate to="/image/adjust-colors" replace /> },
+        { path: "/color-effects", element: <Navigate to="/image/adjust-colors" replace /> },
+        { path: "/:section/:toolId", element: <ToolPage /> },
+        { path: "/", element: <HomePage /> },
+        { path: "*", element: <NotFoundPage /> },
+      ],
+    },
+  ],
+  { basename: BASE_PATH || "/" },
+);
 
 export function App() {
   const isMobile = useMobile();
