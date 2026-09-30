@@ -760,6 +760,22 @@ describe("SCIM global token administration", () => {
         Operations: [{ op: "Replace", value: { active: false } }],
       },
     },
+    // A cased path or key deactivates now (#1731), so it has to meet the
+    // last-admin check too, not slip past it.
+    {
+      method: "PATCH" as const,
+      payload: {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "Replace", path: "Active", value: "False" }],
+      },
+    },
+    {
+      method: "PATCH" as const,
+      payload: {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "Replace", value: { Active: false } }],
+      },
+    },
     {
       method: "DELETE" as const,
       payload: undefined,
@@ -1755,7 +1771,9 @@ describe("SCIM licensed Users and Groups CRUD", () => {
       ]);
     });
 
-    it("treats name.formatted as a no-op and ignores unknown op types", async () => {
+    it("treats name.formatted as a no-op", async () => {
+      // An unknown op used to be skipped here too. It's refused now, applying
+      // nothing (#1731); see "refuses an op that isn't add, remove or replace".
       const { id, userName } = await createScimUser({ userName: uniqueName("scim-patch-noop") });
 
       const res = await crudApp.app.inject({
@@ -1763,10 +1781,7 @@ describe("SCIM licensed Users and Groups CRUD", () => {
         url: `/api/v1/scim/v2/Users/${id}`,
         headers: authHeaders(),
         payload: {
-          Operations: [
-            { op: "replace", path: "name.formatted", value: "Display Name" },
-            { op: "bogus", path: "userName", value: "should-not-apply" },
-          ],
+          Operations: [{ op: "replace", path: "name.formatted", value: "Display Name" }],
         },
       });
 
@@ -2234,6 +2249,92 @@ describe("SCIM licensed Users and Groups CRUD", () => {
       // answer 200 having dropped the deactivation.
       expect(res.statusCode, res.body).toBe(200);
       expect((await userRow(id))?.role).toBe("disabled:user");
+    });
+
+    it("Users PATCH matches a cased path, so a deactivation isn't skipped (#1731)", async () => {
+      const { id } = await createScimUser({ userName: uniqueName("scim-typed-patch-cased") });
+      const res = await send("PATCH", `Users/${id}`, {
+        Operations: [{ op: "Replace", path: "Active", value: "False" }],
+      });
+
+      // Attribute names are case-insensitive (RFC 7643 2.1). This used to
+      // answer 200 and leave the user active.
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await userRow(id))?.role).toBe("disabled:user");
+    });
+
+    it("Users PATCH refuses an op that isn't add, remove or replace, applying nothing", async () => {
+      const { id } = await createScimUser({ userName: uniqueName("scim-typed-patch-badop") });
+      const res = await send("PATCH", `Users/${id}`, {
+        Operations: [
+          { op: "replace", path: "active", value: false },
+          { op: "delete", path: "title" },
+        ],
+      });
+
+      expectRefused(res, "Operations.1.op must be add, remove or replace", "invalidSyntax");
+      expect((await userRow(id))?.role).toBe("user");
+    });
+
+    it("Users PATCH deactivates through a cased key in a path-less value object", async () => {
+      const { id } = await createScimUser({ userName: uniqueName("scim-typed-patch-bulkcase") });
+      const res = await send("PATCH", `Users/${id}`, {
+        Operations: [{ op: "Replace", value: { Active: false } }],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await userRow(id))?.role).toBe("disabled:user");
+    });
+
+    it("Users PATCH removes through cased paths, including the work-email filter", async () => {
+      const { id } = await createScimUser({
+        userName: uniqueName("scim-typed-patch-rm"),
+        externalId: uniqueName("ext"),
+        emails: [{ value: "rm@example.com", primary: true }],
+      });
+      const res = await send("PATCH", `Users/${id}`, {
+        Operations: [
+          { op: "Remove", path: "ExternalId" },
+          { op: "remove", path: 'Emails[type eq "work"].value' },
+        ],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      const row = await userRow(id);
+      expect(row?.scimExternalId).toBeNull();
+      expect(row?.email).toBeNull();
+    });
+
+    it("Users PATCH refuses to remove userName or active, and a remove with no path", async () => {
+      const { id, userName } = await createScimUser({
+        userName: uniqueName("scim-typed-patch-rmbad"),
+      });
+
+      const userNameRes = await send("PATCH", `Users/${id}`, {
+        Operations: [{ op: "remove", path: "userName" }],
+      });
+      expectRefused(userNameRes, "Operations.0: userName can't be removed");
+
+      const noTarget = await send("PATCH", `Users/${id}`, { Operations: [{ op: "remove" }] });
+      expectRefused(noTarget, "Operations.0.path is required for remove", "noTarget");
+
+      const row = await userRow(id);
+      expect(row?.username).toBe(userName);
+      expect(row?.role).toBe("user");
+    });
+
+    it("Users PATCH still ignores attributes it doesn't store", async () => {
+      // IdPs send attributes SnapOtter keeps no column for (title,
+      // name.givenName, phoneNumbers). Refusing them would break every sync.
+      const { id, userName } = await createScimUser({
+        userName: uniqueName("scim-typed-patch-title"),
+      });
+      const res = await send("PATCH", `Users/${id}`, {
+        Operations: [{ op: "replace", path: "title", value: "Engineer" }],
+      });
+
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await userRow(id))?.username).toBe(userName);
     });
 
     it("Users PATCH refuses a path-less value object with a wrong-typed field", async () => {

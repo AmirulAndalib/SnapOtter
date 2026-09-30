@@ -126,8 +126,11 @@ function firstMessage(issues: ZodIssue[]): string {
   return first?.message ?? "Invalid request body";
 }
 
-/** RFC 7644 3.12: a malformed request is invalidSyntax, a bad attribute value invalidValue. */
-export type ScimErrorType = "invalidSyntax" | "invalidValue";
+/**
+ * RFC 7644 3.12: a malformed request is invalidSyntax, a bad attribute value
+ * invalidValue, and a remove with nothing to remove noTarget.
+ */
+export type ScimErrorType = "invalidSyntax" | "invalidValue" | "noTarget";
 
 export type ScimParse<T> =
   | { ok: true; data: T }
@@ -158,16 +161,105 @@ export function parseScimPatch(body: unknown): ScimParse<z.infer<typeof scimPatc
   return parseWith(scimPatchBody, body ?? {}, "invalidSyntax");
 }
 
+const PATCH_OPS = new Set(["add", "remove", "replace"]);
+
+// The paths the Users PATCH route acts on, keyed by their lowercase form.
+// Attribute names are case-insensitive (RFC 7643 2.1), and an exact match
+// used to skip "Active" and answer 200 with the user still active (#1731).
+// Any other path is an attribute SnapOtter keeps no column for (title,
+// name.givenName, phoneNumbers) and is ignored on purpose: IdPs send them on
+// every sync, so refusing them would break provisioning.
+const USER_PATHS = new Map(
+  [
+    "active",
+    "userName",
+    "externalId",
+    "emails",
+    'emails[type eq "work"].value',
+    "name.formatted",
+    "displayName",
+  ].map((path) => [path.toLowerCase(), path]),
+);
+
+// RFC 7644 3.10 lets a path carry its schema URN.
+const USER_SCHEMA_PREFIX = "urn:ietf:params:scim:schemas:core:2.0:user:";
+
+/** The canonical spelling of a known Users path, or undefined for any other. */
+function canonicalUserPath(path: string): string | undefined {
+  let key = path.trim().toLowerCase();
+  if (key.startsWith(USER_SCHEMA_PREFIX)) key = key.slice(USER_SCHEMA_PREFIX.length);
+  return USER_PATHS.get(key);
+}
+
+// The attributes a path-less value object can set, keyed by lowercase name.
+const USER_VALUE_KEYS = new Map(
+  ["userName", "externalId", "active", "emails"].map((key) => [key.toLowerCase(), key]),
+);
+
+/**
+ * A path-less value object with its known keys spelled canonically, so
+ * {"Active": false} deactivates like {"active": false} (#1731). Two spellings
+ * of one attribute are ambiguous, so that's refused rather than guessed.
+ */
+function canonicalValueObject(
+  value: Record<string, unknown>,
+  at: (string | number)[],
+): ScimParse<Record<string, unknown>> {
+  const canonical: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value)) {
+    const name = USER_VALUE_KEYS.get(key.toLowerCase()) ?? key;
+    if (name in canonical) {
+      return {
+        ok: false,
+        detail: `${at.join(".")} sets ${name} more than once`,
+        scimType: "invalidSyntax",
+      };
+    }
+    canonical[name] = field;
+  }
+  return { ok: true, data: canonical };
+}
+
 /**
  * Check and coerce each Users PATCH operation's value for the paths the route
- * acts on. Emails always come back as a list, or null to clear the address.
+ * acts on, and give each known path its canonical spelling so the route can
+ * match it exactly. Emails always come back as a list, or null to clear the
+ * address. An op other than add, remove or replace is malformed.
  */
 export function normalizeUserOps(ops: ScimPatchOp[]): ScimParse<ScimPatchOp[]> {
   const normalized: ScimPatchOp[] = [];
-  for (const [index, op] of ops.entries()) {
-    const opType = op.op.toLowerCase();
+  for (const [index, raw] of ops.entries()) {
+    const opType = raw.op.toLowerCase();
+    if (!PATCH_OPS.has(opType)) {
+      return {
+        ok: false,
+        detail: `Operations.${index}.op must be add, remove or replace`,
+        scimType: "invalidSyntax",
+      };
+    }
+    const canonical = raw.path === undefined ? undefined : canonicalUserPath(raw.path);
+    const op = canonical === undefined ? raw : { ...raw, path: canonical };
     const at = ["Operations", index, "value"];
     let value: ScimParse<unknown> = { ok: true, data: op.value };
+    if (opType === "remove") {
+      // RFC 7644 3.5.2.2: a remove names what it removes.
+      if (op.path === undefined) {
+        return {
+          ok: false,
+          detail: `Operations.${index}.path is required for remove`,
+          scimType: "noTarget",
+        };
+      }
+      // userName is required (RFC 7643 4.1), and dropping a request to unset
+      // active would leave the user as they were while the IdP thinks otherwise.
+      if (op.path === "userName" || op.path === "active") {
+        return {
+          ok: false,
+          detail: `Operations.${index}: ${op.path} can't be removed`,
+          scimType: "invalidValue",
+        };
+      }
+    }
     if (opType === "replace" || opType === "add") {
       if (op.path === "userName") {
         value = parseWith(scimString, op.value, "invalidValue", at);
@@ -189,7 +281,18 @@ export function normalizeUserOps(ops: ScimPatchOp[]): ScimParse<ScimPatchOp[]> {
           ? { ok: true, data: emails.data === null ? null : emailList(emails.data) }
           : emails;
       } else if (!op.path && typeof op.value === "object" && op.value !== null) {
-        value = parseWith(scimUserBody, op.value, "invalidValue", at);
+        const keyed = canonicalValueObject(op.value as Record<string, unknown>, at);
+        value = keyed.ok ? parseWith(scimUserBody, keyed.data, "invalidValue", at) : keyed;
+        // Null reads as "not sent" on a resource body, but here the route
+        // tests `"active" in value` and would read null as a deactivation.
+        // Refuse it, as the path form does.
+        if (value.ok && (value.data as { active?: unknown }).active === null) {
+          value = {
+            ok: false,
+            detail: `${at.join(".")}.active must be a boolean, got null`,
+            scimType: "invalidValue",
+          };
+        }
       }
     }
     if (!value.ok) return value;
