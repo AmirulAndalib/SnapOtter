@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeFilename } from "../../../apps/api/src/lib/filename.js";
+import { createUniqueNamer, sanitizeFilename } from "../../../apps/api/src/lib/filename.js";
+
+describe("createUniqueNamer", () => {
+  it("treats names that differ only in case as a collision, keeping the casing", () => {
+    const unique = createUniqueNamer();
+    const names = ["Report.pdf", "report.pdf", "REPORT.PDF", "report_1.pdf"].map(unique);
+    expect(names[0]).toBe("Report.pdf");
+    expect(names[1]).toBe("report_1.pdf");
+    expect(names[2]).toBe("REPORT_2.PDF");
+    expect(names[3]).toBe("report_1_1.pdf");
+    expect(new Set(names.map((n) => n.toLowerCase())).size).toBe(names.length);
+  });
+
+  it("treats the composed and decomposed spellings of a name as a collision", () => {
+    const unique = createUniqueNamer();
+    const composed = "caf\u00e9.png";
+    const decomposed = "cafe\u0301.png";
+    expect(unique(composed)).toBe(composed);
+    expect(unique(decomposed)).toBe("cafe\u0301_1.png");
+  });
+});
 
 describe("sanitizeFilename", () => {
   it("passes through a simple filename", () => {
