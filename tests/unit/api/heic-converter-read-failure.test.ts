@@ -149,3 +149,100 @@ describe("decodeHeic when heif-dec is killed", () => {
     expect((err as { signal?: string }).signal).toBe("SIGTERM");
   });
 });
+
+/**
+ * #1629. Under a memory rlimit or a cgroup that fails malloc instead of
+ * killing the process, heif-dec reports the failure itself. The stderr in the
+ * 503 cases is what libheif 1.23 printed in the shipped image under
+ * `ulimit -v`. libheif files its security limits under the same "Memory
+ * allocation error" heading, and those are the file's fault, so they stay a
+ * 422. Each 422 case checks the injected error comes back untouched, so a
+ * decoder probe that failed first can't pass it.
+ */
+describe("decodeHeic when libheif runs out of memory", () => {
+  const heic = () => readFixture(fixtures.image.formats("heic"));
+
+  async function passedThrough(fields: Record<string, unknown>): Promise<void> {
+    failures.kill = fields;
+    const err = await decodeError(heic());
+    expect(isDecoderUnavailable(err)).toBe(false);
+    expect(err.message).toBe("Command failed: heif-dec");
+    expect((err as { stderr?: unknown }).stderr).toBe(fields.stderr);
+  }
+
+  it("answers libheif failing to allocate as a 503", async () => {
+    failures.kill = {
+      code: 1,
+      signal: null,
+      stderr:
+        "Could not decode image: Memory allocation error: Unspecified: Allocating 4147215 bytes failed\n",
+    };
+    const err = await decodeError(heic());
+    expect(isDecoderUnavailable(err)).toBe(true);
+    expect(err.name).toBe("DecoderOutOfMemoryError");
+    expect(err.message).toContain("ran out of memory");
+  });
+
+  it("answers heif-dec aborting when it can't start a decoder thread as a 503 naming the limits", async () => {
+    failures.kill = {
+      code: null,
+      signal: "SIGABRT",
+      stderr:
+        "terminate called after throwing an instance of 'std::system_error'\n  what():  Resource temporarily unavailable\n",
+    };
+    const err = await decodeError(heic());
+    expect(isDecoderUnavailable(err)).toBe(true);
+    expect(err.name).toBe("DecoderOutOfMemoryError");
+    expect(err.message).toContain("thread or process limit");
+  });
+
+  it("keeps a security limit, which is the file's fault, out of the 503", async () => {
+    await passedThrough({
+      code: 1,
+      signal: null,
+      stderr:
+        "Could not decode image: Memory allocation error: Security limit exceeded: Allocating an image of size 90000x90000 exceeds the security limit of 1073741824 pixels\n",
+    });
+    await passedThrough({
+      code: 1,
+      signal: null,
+      stderr:
+        "Could not decode image: Memory allocation error: Security limit exceeded: Allocating 2147483648 bytes exceeds the security limit of 536870912 bytes\n",
+    });
+  });
+
+  it("keeps a decoder error that a corrupt file also produces out of the 503", async () => {
+    await passedThrough({
+      code: 1,
+      signal: null,
+      stderr:
+        "Could not decode image: Decoder plugin generated an error: Unspecified: Decoding the input data did not give a decompressed image.\n",
+    });
+  });
+
+  it("keeps a std::bad_alloc abort out of the 503, since a crafted file can raise it", async () => {
+    await passedThrough({
+      code: null,
+      signal: "SIGABRT",
+      stderr:
+        "terminate called after throwing an instance of 'std::bad_alloc'\n  what():  std::bad_alloc\n",
+    });
+  });
+
+  it("keeps any other abort, or one with no output, out of the 503", async () => {
+    await passedThrough({
+      code: null,
+      signal: "SIGABRT",
+      stderr: "heif-dec: libde265/slice.cc:1234: assertion failed\n",
+    });
+    await passedThrough({ code: null, signal: "SIGABRT", stderr: "" });
+  });
+
+  it("only reads the thread failure as a limit when heif-dec actually aborted", async () => {
+    await passedThrough({
+      code: 1,
+      signal: null,
+      stderr: "what():  Resource temporarily unavailable\n",
+    });
+  });
+});
