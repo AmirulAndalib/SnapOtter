@@ -13,11 +13,15 @@ export function MediaPlayerView() {
   const { t } = useTranslation();
   const entry = useFileStore((s) => s.entries[s.selectedIndex]);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [unsupportedCodec, setUnsupportedCodec] = useState(false);
+  // The source that failed to play, not a bare flag: Automate and the mobile
+  // tool page keep this component mounted across selections and results, so
+  // the verdict has to belong to the source it was made for (#1709).
+  const [unplayableSrc, setUnplayableSrc] = useState<string | null>(null);
 
   if (!entry) return null;
   const src = entry.processedUrl ?? entry.blobUrl;
   const isAudio = entry.modality === "audio";
+  const unsupportedCodec = unplayableSrc === src;
 
   // F7: if the browser loaded the container but cannot decode the codec,
   // videoWidth will be 0. Fall back to the server-transcode preview.
@@ -56,9 +60,12 @@ export function MediaPlayerView() {
           data-testid="media-player-video"
           onLoadedMetadata={() => {
             if (videoRef.current && videoRef.current.videoWidth === 0) {
-              setUnsupportedCodec(true);
+              setUnplayableSrc(src);
             }
           }}
+          // A container the browser rejects outright never reaches
+          // loadedmetadata; it fires error instead.
+          onError={() => setUnplayableSrc(src)}
         >
           <track kind="captions" />
           {t.tools.mediaPlayer.unsupported}
