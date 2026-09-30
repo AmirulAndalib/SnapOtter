@@ -159,11 +159,11 @@ interface FakeFont {
  *  xref_object() text, xref_is_stream(), and "bad xref" for an object number
  *  out of range, as the real one raises. A missing key answers ('null', 'null'),
  *  as it does in PyMuPDF. */
-function drawsUnmappedComposite(fonts: FakeFont[]): boolean {
+function onFakePage(fn: string, fonts: FakeFont[]): boolean {
   const code = [
     "import sys, json",
     `sys.path.insert(0, ${JSON.stringify(SCRIPT_DIR)})`,
-    "from doc_text import draws_unmapped_composite_font",
+    `from doc_text import ${fn}`,
     "fonts = json.loads(sys.argv[1])",
     "LENGTH = 1000",
     "TO_UNICODE = {'stream': ('xref', '%d 0 R'), 'none': ('null', 'null'),",
@@ -229,7 +229,7 @@ function drawsUnmappedComposite(fonts: FakeFont[]): boolean {
     "            referencer = XOBJECT if inline(f) and location(f) == 'xobject' else 0",
     "            rows.append(row + (referencer,) if full else row)",
     "        return rows",
-    "sys.stdout.write(json.dumps(draws_unmapped_composite_font(Page())))",
+    `sys.stdout.write(json.dumps(${fn}(Page())))`,
   ].join("\n");
   const res = spawnSync("python3", ["-c", code, JSON.stringify(fonts)], {
     encoding: "utf8",
@@ -238,6 +238,36 @@ function drawsUnmappedComposite(fonts: FakeFont[]): boolean {
   if (res.status !== 0) throw new Error(`python3 failed: ${res.stderr}`);
   return JSON.parse(res.stdout) as boolean;
 }
+
+const drawsUnmappedComposite = (fonts: FakeFont[]) =>
+  onFakePage("draws_unmapped_composite_font", fonts);
+const mapsGlyphIdsAsUnicode = (fonts: FakeFont[]) => onFakePage("maps_glyph_ids_as_unicode", fonts);
+
+describe.skipIf(!hasPython)("doc_text.maps_glyph_ids_as_unicode (#1566)", () => {
+  it("accepts a Type0 font whose ToUnicode is the name /Identity-H", () => {
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "name" }])).toBe(true);
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "name", xref: 0 }])).toBe(true);
+  });
+
+  it("ignores the #955 shapes, which MuPDF already reports as U+FFFD", () => {
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "none" }])).toBe(false);
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "dangling" }])).toBe(false);
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "stream" }])).toBe(false);
+  });
+
+  it("ignores an identity name when a CIDToGIDMap stream makes the CID Unicode", () => {
+    expect(mapsGlyphIdsAsUnicode([{ type: "Type0", toUnicode: "name", cidToGid: "stream" }])).toBe(
+      false,
+    );
+  });
+
+  it("stands down when the page also uses a Type3 font, whose readable text looks the same", () => {
+    const identity: FakeFont = { type: "Type0", toUnicode: "name" };
+    const type3: FakeFont = { type: "Type3", toUnicode: "none" };
+    expect(mapsGlyphIdsAsUnicode([identity, type3])).toBe(false);
+    expect(mapsGlyphIdsAsUnicode([type3, identity])).toBe(false);
+  });
+});
 
 describe.skipIf(!hasPython)("doc_text.draws_unmapped_composite_font", () => {
   it("flags a Type0 font with no ToUnicode map, the glyph-id fallback case (#955)", () => {
@@ -376,6 +406,141 @@ describe.skipIf(!hasPython)("doc_text._inline_font_location", () => {
   });
 });
 
+/** A texttrace span as PyMuPDF returns it, reduced to what the helper reads. */
+type FakeSpan = { font: string; chars: Array<[number, number]> };
+
+/** Call a doc_text helper with JSON arguments and return its JSON result. */
+function callWith<T>(fn: string, ...args: unknown[]): T {
+  const code = [
+    "import sys, json",
+    `sys.path.insert(0, ${JSON.stringify(SCRIPT_DIR)})`,
+    `from doc_text import ${fn}`,
+    `result = ${fn}(*json.loads(sys.argv[1]))`,
+    "sys.stdout.write(json.dumps(sorted(result) if isinstance(result, set) else result))",
+  ].join("\n");
+  const res = spawnSync("python3", ["-c", code, JSON.stringify(args)], {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  if (res.status !== 0) throw new Error(`python3 failed: ${res.stderr}`);
+  return JSON.parse(res.stdout) as T;
+}
+
+const glyphIdFonts = (trace: FakeSpan[]) => callWith<string[]>("glyph_id_fonts", trace);
+
+/** Each char of text as a span char whose glyph id is its codepoint plus an offset. */
+function span(font: string, text: string, glyphOffset: number): FakeSpan {
+  return {
+    font,
+    chars: [...text].map((ch) => [
+      ch.codePointAt(0) as number,
+      (ch.codePointAt(0) as number) + glyphOffset,
+    ]),
+  };
+}
+
+// The shape of #1566 case 2, measured on PyMuPDF 1.27.2.3: with ToUnicode
+// written as the name /Identity-H, texttrace reports each char's unicode as its
+// glyph id, and glyph ids below 0x20 (Roboto's space is glyph 4) as U+FFFD.
+const IDENTITY: FakeSpan = {
+  font: "Roboto-Black",
+  chars: [
+    [44, 44],
+    [73, 73],
+    [80, 80],
+    [80, 80],
+    [83, 83],
+    [0xfffd, 4],
+    [91, 91],
+    [83, 83],
+  ],
+};
+
+describe.skipIf(!hasPython)("doc_text.glyph_id_fonts (#1566)", () => {
+  it("names a font whose unicode is its glyph id, and no other", () => {
+    expect(glyphIdFonts([IDENTITY, span("Helvetica", "Hi there", -31)])).toEqual(["Roboto-Black"]);
+    expect(glyphIdFonts([span("Helvetica", "Hello world", -31)])).toEqual([]);
+    expect(glyphIdFonts([])).toEqual([]);
+  });
+
+  it("tallies across the page, so a short span in a glyph-id font is caught too", () => {
+    const short: FakeSpan = {
+      font: "Roboto-Black",
+      chars: [
+        [44, 44],
+        [73, 73],
+      ],
+    };
+    expect(glyphIdFonts([short, IDENTITY])).toEqual(["Roboto-Black"]);
+  });
+
+  it("leaves U+FFFD out, so a #955 or CID-is-Unicode font isn't taken for glyph ids", () => {
+    const unmapped: FakeSpan = {
+      font: "Montserrat-Black",
+      chars: [...Array(8)].map((_, i) => [0xfffd, 40 + i]),
+    };
+    expect(glyphIdFonts([unmapped])).toEqual([]);
+  });
+
+  it("doesn't judge a font with too few chars to tell from coincidence", () => {
+    expect(
+      glyphIdFonts([
+        {
+          font: "F",
+          chars: [
+            [44, 44],
+            [73, 73],
+          ],
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("doesn't judge a font where only some chars line up", () => {
+    const partly: FakeSpan = {
+      font: "F",
+      chars: [
+        [44, 44],
+        [73, 73],
+        [80, 80],
+        [81, 50],
+        [82, 51],
+        [83, 52],
+      ],
+    };
+    expect(glyphIdFonts([partly])).toEqual([]);
+  });
+});
+
+describe.skipIf(!hasPython)("doc_text.text_outside_fonts (#1566)", () => {
+  const dict = {
+    blocks: [
+      {
+        lines: [
+          {
+            spans: [
+              { font: "Roboto-Black", text: ",IPPS" },
+              { font: "Montserrat-Black", text: "Hello" },
+            ],
+          },
+        ],
+      },
+      { type: 1, image: "..." },
+      { lines: [{ spans: [{ font: "Roboto-Black", text: "[SVPH" }] }] },
+    ],
+  };
+
+  it("keeps the text of every span outside the named fonts, skipping image blocks", () => {
+    expect(callWith<string>("text_outside_fonts", dict, ["Roboto-Black"])).toBe("Hello");
+  });
+
+  it("answers empty text when every span is in a named font", () => {
+    expect(callWith<string>("text_outside_fonts", dict, ["Roboto-Black", "Montserrat-Black"])).toBe(
+      "",
+    );
+  });
+});
+
 // The helpers above are only worth anything if extraction actually calls them,
 // and PyMuPDF is absent from CI so no test here can run main(). Guard the wiring
 // at the source level instead, the way pymupdf-message-redirect.test.ts does.
@@ -399,6 +564,20 @@ describe("doc_text.main wiring", () => {
     );
     expect(main).toMatch(/page\.get_text\(flags=unmapped_as_fffd\)/);
     expect(main).toMatch(/if draws_unmapped_composite_font\(page\)/);
+  });
+
+  it("drops glyph-id spans from a flagged page's verdict (#1566)", () => {
+    expect(main).toMatch(/readable = _judge_without_glyph_id_fonts\(page\)/);
+    const judge = source.slice(
+      source.indexOf("def _judge_without_glyph_id_fonts("),
+      source.indexOf("def main("),
+    );
+    // Only on the identity-name shape: a Type3 font's readable text looks the same.
+    expect(judge).toMatch(/if not maps_glyph_ids_as_unicode\(page\)/);
+    expect(judge).toMatch(/glyph_id_fonts\(page\.get_texttrace\(\)\)/);
+    expect(judge).toMatch(/text_outside_fonts\(page\.get_text\("dict"\), fonts\)/);
+    // Verdict-only, so a failure keeps the #955 verdict rather than failing extraction.
+    expect(judge).toMatch(/except Exception as exc:[\s\S]*return None/);
   });
 
   it("reports the character count of the text it actually wrote", () => {
