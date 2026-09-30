@@ -16,7 +16,12 @@ import type { z } from "zod";
 import { env } from "../config.js";
 import { db, schema } from "../db/index.js";
 import { enqueueToolJob, insertToolJobAlias, waitForJob } from "../jobs/enqueue.js";
-import { INVALID_SAVE_MODE_ERROR, parseSaveModeField } from "../jobs/types.js";
+import {
+  INVALID_CLIENT_JOB_ID_ERROR,
+  INVALID_SAVE_MODE_ERROR,
+  parseClientJobIdField,
+  parseSaveModeField,
+} from "../jobs/types.js";
 import { reportEngineUnavailable } from "../lib/engine-unavailable.js";
 import { formatZodErrors, friendlyError } from "../lib/errors.js";
 import { getFirstMissingBundleForTool, isToolInstalled } from "../lib/feature-status.js";
@@ -280,6 +285,7 @@ export function createToolRoute<T>(app: FastifyInstance, config: ToolRouteConfig
       let fileId: string | null = null;
       let saveModeRaw: string | null = null;
       let clientJobId: string | null = null;
+      let clientJobIdRaw: string | null = null;
       let fileCount = 0;
       const received: ReceivedUpload[] = [];
 
@@ -320,10 +326,7 @@ export function createToolRoute<T>(app: FastifyInstance, config: ToolRouteConfig
               saveModeRaw = part.value as string;
             }
             if (part.fieldname === "clientJobId") {
-              const raw = part.value as string;
-              if (typeof raw === "string" && raw.length > 0 && raw.length <= 128) {
-                clientJobId = raw;
-              }
+              clientJobIdRaw = part.value as string;
             }
           }
         }
@@ -342,6 +345,12 @@ export function createToolRoute<T>(app: FastifyInstance, config: ToolRouteConfig
       if (saveMode === null) {
         return reply.status(400).send({ error: INVALID_SAVE_MODE_ERROR });
       }
+
+      const clientJobIdField = parseClientJobIdField(clientJobIdRaw);
+      if (clientJobIdField === null) {
+        return reply.status(400).send({ error: INVALID_CLIENT_JOB_ID_ERROR });
+      }
+      clientJobId = clientJobIdField ?? null;
 
       // Require at least one file
       if (received.length === 0) {

@@ -19,7 +19,14 @@ import { env } from "../config.js";
 import { db, schema } from "../db/index.js";
 import { recordChildOutcome } from "../jobs/batch-progress.js";
 import { getFlowProducer, injectTraceContext, waitForJob } from "../jobs/enqueue.js";
-import { type Pool, queueName, type ToolJobData, type ToolJobResult } from "../jobs/types.js";
+import {
+  INVALID_CLIENT_JOB_ID_ERROR,
+  type Pool,
+  parseClientJobIdField,
+  queueName,
+  type ToolJobData,
+  type ToolJobResult,
+} from "../jobs/types.js";
 import { autoOrient } from "../lib/auto-orient.js";
 import { type BatchFileNotes, compactFileNotes } from "../lib/batch-file-notes.js";
 import { getSecurityHeaders } from "../lib/csp.js";
@@ -172,6 +179,7 @@ export async function registerBatchRoutes(app: FastifyInstance): Promise<void> {
           const files: ParsedFile[] = [];
           let settingsRaw: string | null = null;
           let clientJobId: string | null = null;
+          let clientJobIdRaw: string | null = null;
           const ocrUploadLimits =
             toolId === "ocr" || toolId === "ocr-pdf"
               ? resolveOcrUploadLimits(env.MAX_UPLOAD_SIZE_MB)
@@ -239,10 +247,7 @@ export async function registerBatchRoutes(app: FastifyInstance): Promise<void> {
               } else if (part.fieldname === "settings") {
                 settingsRaw = part.value as string;
               } else if (part.fieldname === "clientJobId") {
-                const raw = part.value as string;
-                if (typeof raw === "string" && raw.length > 0 && raw.length <= 128) {
-                  clientJobId = raw;
-                }
+                clientJobIdRaw = part.value as string;
               }
             }
           } catch (err) {
@@ -252,6 +257,12 @@ export async function registerBatchRoutes(app: FastifyInstance): Promise<void> {
               details: err instanceof Error ? err.message : String(err),
             });
           }
+
+          const clientJobIdField = parseClientJobIdField(clientJobIdRaw);
+          if (clientJobIdField === null) {
+            return reply.status(400).send({ error: INVALID_CLIENT_JOB_ID_ERROR });
+          }
+          clientJobId = clientJobIdField ?? null;
 
           if (files.length === 0) {
             return reply.status(400).send({ error: "No files provided" });
